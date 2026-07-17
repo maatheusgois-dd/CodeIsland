@@ -1,11 +1,15 @@
 import AppKit
 import ApplicationServices
 import CodeIslandCore
+import os.log
 
 /// Activates the terminal window/tab running a specific Claude Code session.
 /// Supports tab-level switching for: Ghostty, iTerm2, Terminal.app, WezTerm, kitty.
 /// Falls back to app-level activation for: Alacritty, Warp, Hyper, Tabby, Rio.
 struct TerminalActivator {
+    /// Visible debug logger for click-to-jump. Watch with:
+    ///   log stream --predicate 'subsystem == "com.codeisland" AND category == "activator"' --level notice
+    private static let log = Logger(subsystem: "com.codeisland", category: "activator")
     // Internal (not private) so support tests can assert a terminal is recognized,
     // matching sourceToNativeAppBundleId's visibility. See TeraxSupportTests.
     static let knownTerminals: [(name: String, bundleId: String)] = [
@@ -75,8 +79,28 @@ struct TerminalActivator {
         "com.anthropic.claudefordesktop": "Claude",
     ]
 
+    /// Debounce: drop a duplicate activate() for the same session within this interval.
+    /// SwiftUI onTapGesture can fire twice per physical click (down+up on some views),
+    /// and the session card stacks two tap-gesture surfaces. Coalesce them so we don't
+    /// spawn multiple `cursor -r` / AppleScript activations that fight each other.
+    private static let activateDebounceInterval: TimeInterval = 0.6
+    private static var lastActivateKey: String = ""
+    private static var lastActivateTime: Date = .distantPast
+
     static func activate(session: SessionSnapshot, sessionId: String? = nil) {
-        guard !session.isRemote else { return }
+        let key = sessionId ?? session.cwd ?? ""
+        let now = Date()
+        if key == lastActivateKey, now.timeIntervalSince(lastActivateTime) < activateDebounceInterval {
+            log.notice("activate DEBOUNCE-DROP session=\(key, privacy: .public) (within \(String(format: "%.2f", now.timeIntervalSince(lastActivateTime)), privacy: .public)s)")
+            return
+        }
+        lastActivateKey = key
+        lastActivateTime = now
+        guard !session.isRemote else {
+            log.notice("activate SKIP remote session=\(sessionId ?? "nil", privacy: .public)")
+            return
+        }
+        log.notice("activate BEGIN session=\(sessionId ?? "nil", privacy: .public) source=\(session.source, privacy: .public) cwd=\(session.cwd ?? "", privacy: .public) termBundle=\(session.termBundleId ?? "nil", privacy: .public) tty=\(session.ttyPath ?? "nil", privacy: .public)")
 
         // Native app by bundle ID (e.g. Codex APP vs Codex CLI). These are IDE-style
         // apps (Cursor, Trae, Qoder, Factory, …) that can hold several workspace
@@ -86,6 +110,7 @@ struct TerminalActivator {
         // no cwd or no matching window, so this never regresses single-window apps.
         if let bundleId = session.termBundleId,
            nativeAppBundles[bundleId] != nil {
+            log.notice("activate → IDE window (nativeAppBundle) bundle=\(bundleId, privacy: .public)")
             activateIDEWindow(bundleId: bundleId, cwd: session.cwd)
             return
         }
@@ -93,12 +118,14 @@ struct TerminalActivator {
         // IDE integrated terminal: try window-level matching by CWD, fall back to app-level
         if session.isIDETerminal,
            let bundleId = session.termBundleId {
+            log.notice("activate → IDE window (integrated terminal) bundle=\(bundleId, privacy: .public)")
             activateIDEWindow(bundleId: bundleId, cwd: session.cwd)
             return
         }
 
         // IDE sources: just bring the app to front
         if let appName = appSources[session.source] {
+            log.notice("activate → IDE source app=\(appName, privacy: .public)")
             if let app = NSWorkspace.shared.runningApplications.first(where: {
                 $0.localizedName == appName
             }) {
@@ -110,30 +137,20 @@ struct TerminalActivator {
             return
         }
 
-        // --- Host GUI client detection (e.g. OpenChamber embedding OpenCode as a server) ---
-        // When an agent is spawned by a GUI client app — not from a terminal and not the
-        // agent's own desktop app — clicking the session should bring that host client to
-        // front instead of falling through to the terminal or the agent's native desktop
-        // app. Walk the CLI process ancestry looking for the nearest running regular GUI
-        // app that is neither a known terminal nor a known agent-native app; that app is
-        // the host. Generic by design: any current/future client (OpenChamber, …) works
-        // without hardcoding bundle IDs. Runs BEFORE the sourceToNativeAppBundleId branch
-        // below so a coincidentally-running agent desktop app never wins over the real host.
         if let hostBid = resolveHostClientBundleId(for: session) {
+            log.notice("activate → host GUI client bundle=\(hostBid, privacy: .public)")
             activateByBundleId(hostBid)
             return
         }
 
-        // When the source has a known desktop app that's running, prefer the desktop
-        // app over the terminal. This handles e.g. OpenCode CLI launched from Ghostty but
-        // editing in VS Code — without this, the inherited TERM_PROGRAM=ghostty would jump
-        // to the wrong terminal. Also covers cases where the terminal bundle ID is present
-        // but the user wants to focus the desktop IDE instead (e.g. opencode → OpenCode).
         if let nativeBundleId = sourceToNativeAppBundleId[session.source],
            NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == nativeBundleId }) {
+            log.notice("activate → native desktop app bundle=\(nativeBundleId, privacy: .public)")
             activateByBundleId(nativeBundleId)
             return
         }
+
+        log.notice("activate → terminal tab matching path termApp=\(session.termApp ?? "nil", privacy: .public)")
 
         // Resolve terminal: bundle ID (most accurate) → TERM_PROGRAM → scan running apps
         let termApp: String
@@ -142,7 +159,6 @@ struct TerminalActivator {
             termApp = resolved
         } else {
             let raw = session.termApp ?? ""
-            // "tmux" / "screen" etc. are not GUI apps — fall back to scanning
             if raw.isEmpty || raw.lowercased() == "tmux" || raw.lowercased() == "screen" {
                 termApp = detectRunningTerminal()
             } else {
@@ -150,19 +166,11 @@ struct TerminalActivator {
             }
         }
         let lower = termApp.lowercased()
+        log.notice("activate resolved termApp=\(termApp, privacy: .public)")
 
-        // --- Superset (Electron agent-orchestration terminal): app-level activation ---
-        // Must come before the kitty/cmux/iTerm branches. Superset spoofs TERM_PROGRAM to
-        // "kitty" (so claude-code parses CSI-u keyboard input) and strips __CFBundleIdentifier
-        // from the PTY env, so without this the loose `lower.contains("kitty")` branch would
-        // launch/raise the REAL kitty app instead. Superset is a single-window Electron app with
-        // internal xterm.js panes and ships no focus/activate CLI or AppleScript dictionary, so
-        // pane precision is impossible upstream — we can only bring the Superset window forward
-        // (same app-level behavior as Warp / Alacritty fallback). The presence of any SUPERSET_*
-        // env var (captured into supersetWorkspaceId / supersetPaneId) uniquely identifies it.
-        // __CFBundleIdentifier is stripped so we can't tell canary from stable; default to the
-        // stable bundle and fall back to whichever variant is actually running. (#213)
+        // --- Superset ---
         if session.supersetWorkspaceId != nil || session.supersetPaneId != nil {
+            log.notice("activate → Superset")
             let supersetBundles = ["com.superset.desktop", "com.superset.desktop.canary"]
             let runningBundle = supersetBundles.first(where: { bid in
                 NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == bid })
@@ -171,12 +179,9 @@ struct TerminalActivator {
             return
         }
 
-        // --- Zellij multiplexer: precise pane → tab focus, then activate parent terminal ---
-        // Must come before tmux/cmux/iTerm/Ghostty branches AND the Terax branch below:
-        // Zellij runs *inside* one of those terminals, so termApp/termBundleId points to
-        // the host shell. The presence of zellijPaneId is what disambiguates "running
-        // inside Zellij" from "plain shell".
+        // --- Zellij ---
         if let zellijPane = session.zellijPaneId, !zellijPane.isEmpty {
+            log.notice("activate → Zellij pane=\(zellijPane, privacy: .public)")
             activateZellij(
                 paneId: zellijPane,
                 sessionName: session.zellijSessionName,
@@ -185,104 +190,75 @@ struct TerminalActivator {
             return
         }
 
-        // --- Terax (native webview terminal): app-level activation only ---
-        // Like Superset, Terax (app.crynta.terax) is a single-window app whose tabs are
-        // drawn inside a webview. It exports no per-pane env id (only TERAX_TERMINAL /
-        // TERAX_BLOCKS) and ships no URL scheme, AppleScript dictionary, focus CLI, or
-        // native tab shortcut — and its tabs are absent from the accessibility tree — so
-        // per-tab precision is impossible upstream. Without this branch Terax has no
-        // TERM_PROGRAM, so detectRunningTerminal() would misroute the click to whichever
-        // other terminal happens to be running. Bring its window forward (Space-aware,
-        // same as Superset) via bundle id. Kept AFTER the Zellij branch so a Zellij
-        // session hosted in Terax still gets precise pane focus first.
+        // --- Terax ---
         if session.termBundleId == "app.crynta.terax" || lower == "terax" {
+            log.notice("activate → Terax")
             activateByBundleId("app.crynta.terax")
             return
         }
 
-        // --- tmux: switch pane first, then fall through to terminal-specific activation ---
+        // --- tmux ---
         if let pane = session.tmuxPane, !pane.isEmpty {
+            log.notice("activate → tmux pane=\(pane, privacy: .public)")
             activateTmux(pane: pane, tmuxEnv: session.tmuxEnv)
         }
-
-        // In tmux, use the client TTY (outer terminal) for tab matching,
-        // since ttyPath is the inner tmux pty which won't match the terminal's tab.
-        // When tmux is detached (no client TTY), set effectiveTty to nil so terminal-specific
-        // handlers skip useless TTY matching and fall back to CWD or app-level activation.
         let inTmux = session.tmuxPane != nil && !(session.tmuxPane ?? "").isEmpty
         let effectiveTty: String?
         if inTmux {
-            effectiveTty = session.tmuxClientTty  // nil when detached — intentional
+            effectiveTty = session.tmuxClientTty
         } else {
             effectiveTty = session.ttyPath
         }
 
-        // --- cmux: surface-level precise jump (workspace + surface) ---
-        // Must be handled before generic tab-switching logic to avoid degrading to bringToFront
+        // --- cmux ---
         if lower.contains("cmux") {
-            activateCmux(
-                surfaceId: session.cmuxSurfaceId,
-                workspaceId: session.cmuxWorkspaceId
-            )
+            log.notice("activate → cmux")
+            activateCmux(surfaceId: session.cmuxSurfaceId, workspaceId: session.cmuxWorkspaceId)
             return
         }
 
         // --- Tab-level switching (5 terminals) ---
-
         if lower.contains("iterm") {
+            log.notice("activate → iTerm tty=\(effectiveTty ?? "nil", privacy: .public) itermId=\(session.itermSessionId ?? "nil", privacy: .public)")
             if let itermId = session.itermSessionId, !itermId.isEmpty {
                 activateITerm(sessionId: itermId)
             } else {
-                // No session ID — fall back to tty or cwd matching
                 activateITermByTtyOrCwd(tty: effectiveTty, cwd: session.cwd)
             }
             return
         }
-
         if lower == "ghostty" {
-            activateGhostty(
-                cwd: session.cwd,
-                tty: effectiveTty,
-                sessionId: sessionId,
-                source: session.source,
-                tmuxPane: session.tmuxPane,
-                tmuxEnv: session.tmuxEnv
-            )
+            log.notice("activate → Ghostty tty=\(effectiveTty ?? "nil", privacy: .public)")
+            activateGhostty(cwd: session.cwd, tty: effectiveTty, sessionId: sessionId, source: session.source, tmuxPane: session.tmuxPane, tmuxEnv: session.tmuxEnv)
             return
         }
-
-        // Match Terminal.app by bundle ID only — Warp sets TERM_PROGRAM=Apple_Terminal
         if session.termBundleId == "com.apple.Terminal" || (session.termBundleId == nil && lower == "terminal") {
+            log.notice("activate → Terminal.app tty=\(effectiveTty ?? "nil", privacy: .public) cwd=\(session.cwd ?? "nil", privacy: .public)")
             activateTerminalApp(ttyPath: effectiveTty, cwd: session.cwd)
             return
         }
-
-        // Kaku is a WezTerm fork: same `cli list` JSON shape, different binary + bundle id.
-        // Match by bundle id (most reliable) or termApp string fallback.
         if session.termBundleId == "fun.tw93.kaku" || lower == "kaku" {
+            log.notice("activate → Kaku tty=\(effectiveTty ?? "nil", privacy: .public)")
             activateKaku(ttyPath: effectiveTty, cwd: session.cwd, paneId: session.weztermPaneId, cliPid: session.cliPid)
             return
         }
-
         if lower.contains("wezterm") || lower.contains("wez") {
+            log.notice("activate → WezTerm tty=\(effectiveTty ?? "nil", privacy: .public)")
             activateWezTerm(ttyPath: effectiveTty, cwd: session.cwd, paneId: session.weztermPaneId, cliPid: session.cliPid)
             return
         }
-
         if lower.contains("kitty") {
+            log.notice("activate → kitty")
             activateKitty(windowId: session.kittyWindowId, cwd: session.cwd, source: session.source)
             return
         }
-
-        // --- Warp (SQLite pane precision jump + Cmd+N tab switch) ---
         if lower.contains("warp") {
+            log.notice("activate → Warp")
             activateWarp(cwd: session.cwd)
             return
         }
-
         // --- Other terminals (Alacritty, Hyper, Tabby, Rio, etc.) ---
-        // Try window-level matching via System Events (title contains CWD folder name),
-        // similar to IDE window matching. Falls back to app-level if no match.
+        log.notice("activate → generic terminal window match bundle=\(session.termBundleId ?? "nil", privacy: .public)")
         if let bundleId = session.termBundleId, let cwd = session.cwd, !cwd.isEmpty {
             activateTerminalWindow(bundleId: bundleId, cwd: cwd, fallbackName: termApp)
         } else {
@@ -677,15 +653,16 @@ struct TerminalActivator {
         guard let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == "com.apple.Terminal"
         }) else {
+            log.notice("Terminal.app not running — launching")
             bringToFront("Terminal")
             return
         }
         if app.isHidden { app.unhide() }
         app.activate()
+        log.notice("Terminal.app activate tty=\(ttyPath ?? "nil", privacy: .public) cwd=\(cwd ?? "nil", privacy: .public)")
 
         let ttyEscaped = ttyPath.map(escapeAppleScript) ?? ""
         let dirEscaped = cwd.map { escapeAppleScript(($0 as NSString).lastPathComponent) } ?? ""
-
         // Try tty → tab auto-name → user custom title → deminiaturize any window as a last resort.
         // Terminal.app auto-generates `name of t` containing the running command + cwd; `custom title`
         // only exists when the user set it explicitly, so matching against `name` works for the
@@ -701,6 +678,7 @@ struct TerminalActivator {
             set targetTty to "\(ttyEscaped)"
             set targetDir to "\(dirEscaped)"
             set found to false
+            set strategy to 0
 
             -- Strategy 1: precise tty match
             if targetTty is not "" then
@@ -712,6 +690,7 @@ struct TerminalActivator {
                                 set selected tab of w to t
                                 set index of w to 1
                                 set found to true
+                                set strategy to 1
                                 exit repeat
                             end if
                         end try
@@ -730,6 +709,7 @@ struct TerminalActivator {
                                 set selected tab of w to t
                                 set index of w to 1
                                 set found to true
+                                set strategy to 2
                                 exit repeat
                             end if
                         end try
@@ -748,6 +728,7 @@ struct TerminalActivator {
                                 set selected tab of w to t
                                 set index of w to 1
                                 set found to true
+                                set strategy to 3
                                 exit repeat
                             end if
                         end try
@@ -758,6 +739,7 @@ struct TerminalActivator {
 
             -- Fallback: unminimize the first miniaturized window so the user always sees something.
             if not found then
+                set strategy to 4
                 repeat with w in windows
                     try
                         if miniaturized of w then
@@ -770,6 +752,7 @@ struct TerminalActivator {
             end if
 
             activate
+            return strategy as text
         end tell
 
         -- Final fallback via System Events: when Terminal.app's `windows` collection doesn't
@@ -790,7 +773,8 @@ struct TerminalActivator {
             end tell
         end try
         """
-        runAppleScript(script)
+        let result = runAppleScriptReturningString(script)
+        log.notice("Terminal.app result strategy=\(result ?? "nil", privacy: .public) (1=tty,2=name,3=custom,4=unminimize)")
     }
 
     // MARK: - WezTerm (CLI: wezterm cli list + activate-tab)
@@ -1029,33 +1013,75 @@ struct TerminalActivator {
 
     // MARK: - IDE window-level activation (JetBrains, VS Code, Zed, etc.)
 
+
+    /// Returns the path to the bundled CLI for an Electron IDE (Cursor / VS Code),
+    /// if present. Used to focus the correct workspace window via `--reuse-window`
+    /// since System Events can't enumerate all Electron windows reliably.
+    private static func idEditorCLIPath(bundleId: String) -> String? {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId),
+              let appBundle = Bundle(url: appURL) else { return nil }
+        let resources = appBundle.bundlePath + "/Contents/Resources/app/bin"
+        // Cursor ships `cursor`; VS Code ships `code`. Prefer the first executable found.
+        let candidates = ["cursor", "code"]
+        for name in candidates {
+            let path = resources + "/" + name
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return nil
+    }
+
     /// Activate the specific IDE window whose title contains the project folder name.
     /// Falls back to app-level activation if no CWD or no matching window found.
     private static func activateIDEWindow(bundleId: String, cwd: String?) {
         guard let cwd = cwd, !cwd.isEmpty else {
+            log.notice("IDE no cwd — app-level activation bundle=\(bundleId, privacy: .public)")
             activateByBundleId(bundleId)
             return
         }
+        if let cliPath = idEditorCLIPath(bundleId: bundleId) {
+            log.notice("IDE CLI reuse-window cli=\(cliPath, privacy: .public) cwd=\(cwd, privacy: .public)")
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: cliPath)
+            proc.arguments = ["-r", "--reuse-window", cwd]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            do {
+                try proc.run()
+                // Give the CLI a moment to select the workspace window, then
+                // activate the app by bundle ID so macOS switches to the Space
+                // that window lives on. `--reuse-window` alone doesn't switch
+                // Spaces when the target window is on another desktop, so
+                // activateByBundleId (which uses NSWorkspace.openApplication)
+                // handles the Space transition while the CLI pinned the window.
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) {
+                    log.notice("IDE CLI reuse-window sent — activating bundle for Space switch")
+                    activateByBundleId(bundleId)
+                }
+                log.notice("IDE CLI reuse-window launched + Space-switch scheduled")
+                return
+            } catch {
+                log.error("IDE CLI reuse-window FAILED to launch: \(error.localizedDescription, privacy: .public) — falling back to AX")
+            }
+        } else {
+            log.notice("IDE CLI not found for bundle=\(bundleId, privacy: .public) — using AX fallback")
+        }
+
         let folderName = (cwd as NSString).lastPathComponent
         guard !folderName.isEmpty else {
             activateByBundleId(bundleId)
             return
         }
-
         guard let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == bundleId
         }) else {
             activateByBundleId(bundleId)
             return
         }
-
         if app.isHidden { app.unhide() }
         app.activate()
-
-        // Use System Events to iterate windows and AXRaise the best match.
-        // Priority: exact folder name at word boundary > shortest title containing folder name.
-        // This avoids jumping to the wrong window when multiple projects share a folder name
-        // (e.g., /work/app vs /backup/app).
+        log.notice("IDE AX fallback folder=\(folderName, privacy: .public) appName=\(app.localizedName ?? "?", privacy: .public)")
         let appName = app.localizedName ?? "Application"
         let escapedFolder = escapeAppleScript(folderName)
         let script = """
@@ -1071,7 +1097,7 @@ struct TerminalActivator {
                             set wLen to count of wName
                             if wLen < bestLen then
                                 set bestWindow to w
-                                set bestLen to wLen
+                                set bestLen = wLen
                             end if
                         end if
                     end try
@@ -1085,43 +1111,6 @@ struct TerminalActivator {
         runAppleScript(script)
     }
 
-    // MARK: - Generic terminal window matching (Alacritty, Warp, Hyper, etc.)
-
-    /// For terminals without tab-switching APIs, try to raise the window whose title
-    /// contains the project folder name via System Events. Falls back to app-level.
-    private static func activateTerminalWindow(bundleId: String, cwd: String, fallbackName: String) {
-        guard let app = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == bundleId
-        }) else {
-            bringToFront(fallbackName)
-            return
-        }
-        if app.isHidden { app.unhide() }
-        app.activate()
-
-        let folderName = (cwd as NSString).lastPathComponent
-        guard !folderName.isEmpty else { return }
-
-        let appName = app.localizedName ?? fallbackName
-        let script = """
-        tell application "System Events"
-            tell process "\(escapeAppleScript(appName))"
-                repeat with w in windows
-                    try
-                        if name of w contains "\(escapeAppleScript(folderName))" then
-                            perform action "AXRaise" of w
-                            return
-                        end if
-                    end try
-                end repeat
-            end tell
-        end tell
-        """
-        runAppleScript(script)
-    }
-
-    // MARK: - Activate by bundle ID
-
     private static func activateByBundleId(_ bundleId: String) {
         if let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == bundleId
@@ -1133,6 +1122,44 @@ struct TerminalActivator {
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
+    }
+
+    // MARK: - Generic terminal window matching (Alacritty, Warp, Hyper, etc.)
+
+    /// For terminals without tab-switching APIs, try to raise the window whose title
+    /// contains the project folder name via System Events. Falls back to app-level.
+    private static func activateTerminalWindow(bundleId: String, cwd: String, fallbackName: String) {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == bundleId
+        }) else {
+            log.notice("generic terminal not running — bringToFront=\(fallbackName, privacy: .public)")
+            bringToFront(fallbackName)
+            return
+        }
+        if app.isHidden { app.unhide() }
+        app.activate()
+
+        let folderName = (cwd as NSString).lastPathComponent
+        guard !folderName.isEmpty else { return }
+
+        let appName = app.localizedName ?? fallbackName
+        let escapedFolder = escapeAppleScript(folderName)
+        log.notice("generic terminal window match folder=\(folderName, privacy: .public) app=\(appName, privacy: .public)")
+        let script = """
+        tell application "System Events"
+            tell process "\(escapeAppleScript(appName))"
+                repeat with w in windows
+                    try
+                        if name of w contains "\(escapedFolder)" then
+                            perform action "AXRaise" of w
+                            return
+                        end if
+                    end try
+                end repeat
+            end tell
+        end tell
+        """
+        runAppleScript(script)
     }
 
     /// Bring an app forward without calling `NSRunningApplication.activate()`.
@@ -1206,6 +1233,25 @@ struct TerminalActivator {
                 script.executeAndReturnError(&error)
             }
         }
+    }
+
+    /// Runs an AppleScript on a background queue and returns its stdout as a string.
+    /// Used to read a return value from the script (e.g. which tab-match strategy hit).
+    private static func runAppleScriptReturningString(_ source: String) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", source]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func runOsaScript(_ source: String) {

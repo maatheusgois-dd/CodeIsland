@@ -351,7 +351,22 @@ if sourceTag == nil && effectiveSource != nil {
     json["_via_plugin"] = true
 }
 
-let resolvedTrackedPID = CLIProcessResolver.resolvedTrackedPID(
+// Resolve the CLI PID to track. By default we walk the process ancestry so
+// the hook's transient shell parent (e.g. `sh -c`) is replaced by the
+// long-lived CLI binary. An explicit caller-supplied `_ppid` (an Int in the
+// JSON payload) is honoured when the `CODEISLAND_KEEP_PPID` env var is set —
+// this lets an external registrar attribute events to a CLI process that
+// isn't this bridge's actual ancestor (e.g. registering pre-existing omp
+// sessions that started before their extension was installed). Normal
+// hooks never set `_ppid`, so this never changes their behavior.
+let callerPpid: Int32? = {
+    guard ProcessInfo.processInfo.environment["CODEISLAND_KEEP_PPID"] != nil else { return nil }
+    // Accept any numeric shape JSONSerialization may produce (Int or NSNumber).
+    if let v = json["_ppid"] as? Int { return Int32(truncatingIfNeeded: v) }
+    if let v = json["_ppid"] as? NSNumber { return Int32(truncatingIfNeeded: v.intValue) }
+    return nil
+}()
+let resolvedTrackedPID = callerPpid ?? CLIProcessResolver.resolvedTrackedPID(
     immediateParentPID: Int32(immediateParentPID),
     source: effectiveSource,
     ancestry: coreAncestry
@@ -411,10 +426,14 @@ alarm(isBlocking ? 8 : 4)
 
 // --- Deep terminal environment collection ---
 // Terminal app identification (only include when present)
-if let termApp = env["TERM_PROGRAM"], !termApp.isEmpty {
+// Terminal app identification (only include when present). Respect a
+// caller-supplied value already in the JSON (e.g. an external registrar
+// attributing events to a Cursor workspace, not this bridge's own terminal)
+// before falling back to this bridge process's environment.
+if json["_term_app"] == nil, let termApp = env["TERM_PROGRAM"], !termApp.isEmpty {
     json["_term_app"] = termApp
 }
-if let termBundle = env["__CFBundleIdentifier"], !termBundle.isEmpty {
+if json["_term_bundle"] == nil, let termBundle = env["__CFBundleIdentifier"], !termBundle.isEmpty {
     json["_term_bundle"] = termBundle
 }
 

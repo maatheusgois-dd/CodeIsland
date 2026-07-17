@@ -181,6 +181,49 @@ final class AppState {
         guard let rid = rotatingSessionId else { return nil }
         return sessions[rid]
     }
+
+    // MARK: - Favorites (starred sessions)
+
+    /// Favorite session IDs persisted in UserDefaults. Favorited sessions sort to the
+    /// top of the session list and get a highlighted card. `@Observable` doesn't support
+    /// `@AppStorage`, so we read/write UserDefaults manually and bump a published counter
+    /// to trigger SwiftUI updates.
+    private let favoritesKey = "favoriteSessionIds"
+    private(set) var favoritesRevision: Int = 0
+
+    var favoriteSessionIds: Set<String> {
+        let raw = UserDefaults.standard.string(forKey: favoritesKey) ?? ""
+        return Set(raw.split(separator: ",").map(String.init).filter { !$0.isEmpty })
+    }
+
+    func isFavorite(_ sessionId: String) -> Bool {
+        favoriteSessionIds.contains(sessionId)
+    }
+
+    func toggleFavorite(_ sessionId: String) {
+        var ids = favoriteSessionIds
+        if ids.contains(sessionId) {
+            ids.remove(sessionId)
+        } else {
+            ids.insert(sessionId)
+        }
+        UserDefaults.standard.set(ids.sorted().joined(separator: ","), forKey: favoritesKey)
+        favoritesRevision &+= 1  // trigger @Observable update
+    }
+
+    /// Mark a session as "read" — clears its working status to idle so it
+    /// stops showing as active. Called when the user clicks the card to
+    /// acknowledge they've seen the response.
+    func markAsRead(_ sessionId: String) {
+        guard let session = sessions[sessionId] else { return }
+        // Only clear if not actively waiting for approval/question
+        if session.status == .waitingApproval || session.status == .waitingQuestion { return }
+        sessions[sessionId]?.status = .idle
+        sessions[sessionId]?.currentTool = nil
+        sessions[sessionId]?.toolDescription = nil
+        refreshDerivedState()
+        scheduleSave()
+    }
     private var rotationTimer: Timer?
 
     private func startCleanupTimer() {

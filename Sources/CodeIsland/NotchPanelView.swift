@@ -1709,7 +1709,19 @@ private struct SessionListView: View {
             return [("", nil, [only])]
         }
 
-        let sorted = appState.sessions.keys.sorted()
+        let favs = appState.favoriteSessionIds
+        let sorted = appState.sessions.keys.sorted { a, b in
+            let fa = favs.contains(a), fb = favs.contains(b)
+            if fa != fb { return fa }            // favorites first
+            // Sort by startTime (stable — doesn't jump when sessions are
+            // added/removed by the 3s cleanup/process scan timer). UUID sort
+            // would insert new sessions at random positions, causing the list
+            // to reorder every few seconds.
+            let ta = appState.sessions[a]?.startTime ?? .distantPast
+            let tb = appState.sessions[b]?.startTime ?? .distantPast
+            if ta != tb { return ta < tb }
+            return a < b                         // final tiebreaker
+        }
 
         switch groupingMode {
         case "status":
@@ -2228,6 +2240,17 @@ private struct SessionCard: View {
                         sessionColor: .white.opacity(0.76),
                         dividerColor: .white.opacity(0.28)
                     )
+                    // Favorite star — always visible when favorited (gold),
+                    // otherwise shows on hover as a dim outline.
+                    Button {
+                        appState.toggleFavorite(sessionId)
+                    } label: {
+                        Image(systemName: appState.isFavorite(sessionId) ? "star.fill" : "star")
+                            .font(.system(size: fontSize - 1, weight: .medium))
+                            .foregroundStyle(appState.isFavorite(sessionId) ? Color.yellow : Color.white.opacity(hovering ? 0.45 : 0))
+                    }
+                    .buttonStyle(.plain)
+                    .help(appState.isFavorite(sessionId) ? "Remove from favorites" : "Add to favorites")
                     Spacer(minLength: 8)
 
                     HStack(spacing: 4) {
@@ -2370,6 +2393,12 @@ private struct SessionCard: View {
                                     color: .white.opacity(0.75)
                                 )
                                 .truncationMode(.tail)
+                            } else if session.lastAssistantMessage != nil {
+                                // Session finished a response but hasn't been
+                                // clicked yet — show "Ready" instead of "thinking".
+                                Text("Ready")
+                                    .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(Color(red: 0.4, green: 0.85, blue: 0.5))
                             } else {
                                 TypingIndicator(fontSize: fontSize, label: "thinking")
                             }
@@ -2384,7 +2413,11 @@ private struct SessionCard: View {
         .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(hovering ? Color.white.opacity(0.10) : Color.white.opacity(0.05))
+                .fill(cardBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(appState.isFavorite(sessionId) ? Color.yellow.opacity(0.35) : Color.clear, lineWidth: 1)
         )
         .padding(.horizontal, 6)
         .offset(x: failureShakeOffset)
@@ -2397,8 +2430,19 @@ private struct SessionCard: View {
         }
     }
 
+    private var cardBackground: Color {
+        if appState.isFavorite(sessionId) {
+            return Color.yellow.opacity(hovering ? 0.14 : 0.08)
+        }
+        return hovering ? Color.white.opacity(0.10) : Color.white.opacity(0.05)
+    }
+
     private func handleSessionClick() {
         TerminalActivator.activate(session: session, sessionId: sessionId)
+
+        // Mark as read — transitions the session from active/processing to idle
+        // so the card stops showing "Ready" after the user clicks it.
+        appState.markAsRead(sessionId)
 
         guard autoCollapseAfterSessionJump, !session.isRemote else { return }
 
