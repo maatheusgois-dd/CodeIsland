@@ -143,6 +143,16 @@ struct TerminalActivator {
             return
         }
 
+        // Codex desktop app: bring the ChatGPT app to front. The app doesn't
+        // support deep-link navigation to existing chats (codex://threads/ only
+        // creates new threads), and the sidebar search field can't be focused
+        // externally without breaking the active editor. So we just activate
+        // the app — the user can manually find the chat in the sidebar.
+        if session.source == "codex" {
+            log.notice("activate → codex desktop app session=\(sessionId ?? "nil", privacy: .public) cwd=\(session.cwd ?? "nil", privacy: .public)")
+            activateByBundleId("com.openai.codex")
+            return
+        }
         if let nativeBundleId = sourceToNativeAppBundleId[session.source],
            NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == nativeBundleId }) {
             log.notice("activate → native desktop app bundle=\(nativeBundleId, privacy: .public)")

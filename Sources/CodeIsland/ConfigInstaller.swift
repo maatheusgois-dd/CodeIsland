@@ -167,6 +167,12 @@ struct ConfigInstaller {
     private static let openclawDir = NSHomeDirectory() + "/.openclaw"
     private static let openclawPluginDir = NSHomeDirectory() + "/.openclaw/codeisland-plugin"
     private static let openclawConfigPath = NSHomeDirectory() + "/.openclaw/openclaw.json"
+    // Codex desktop-app proxy: the ChatGPT app's app-server doesn't fire hooks,
+    // so a LaunchAgent polls the state DB and forwards events to the bridge.
+    private static let codexProxyPath = codeislandDir + "/codex-proxy.py"
+    private static let codexProxyPlistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.codeisland.codex-proxy.plist"
+    private static let codexProxyLogPath = codeislandDir + "/codex-proxy.log"
+    private static let codexProxyLabel = "com.codeisland.codex-proxy"
 
 
     // Legacy paths for migration cleanup (#32)
@@ -776,6 +782,9 @@ struct ConfigInstaller {
         if isEnabled(source: "codex"),
            fm.fileExists(atPath: codexHome()) {
             enableCodexHooksConfig(fm: fm)
+            // The ChatGPT desktop app's app-server doesn't fire hooks.
+            // Install a LaunchAgent proxy that polls the state DB.
+            installCodexProxy(fm: fm)
         }
 
         // Install OpenCode plugin
@@ -828,6 +837,7 @@ struct ConfigInstaller {
         }
 
         uninstallOpencodePlugin(fm: fm)
+        uninstallCodexProxy(fm: fm)
     }
 
     /// Check if Claude Code hooks are installed
@@ -918,7 +928,7 @@ struct ConfigInstaller {
                 return installZcodeHooks(fm: fm)
             } else {
                 installExternalHooks(cli: cli, fm: fm)
-                if cli.source == "codex" { enableCodexHooksConfig(fm: fm) }
+                if cli.source == "codex" { enableCodexHooksConfig(fm: fm); installCodexProxy(fm: fm) }
                 return isHooksInstalled(for: cli, fm: fm)
             }
         } else {
@@ -1013,7 +1023,7 @@ struct ConfigInstaller {
                 }
             } else {
                 installExternalHooks(cli: cli, fm: fm)
-                if cli.source == "codex" { enableCodexHooksConfig(fm: fm) }
+                if cli.source == "codex" { enableCodexHooksConfig(fm: fm); installCodexProxy(fm: fm) }
                 if isHooksInstalled(for: cli, fm: fm) {
                     repaired.append(cli.name)
                 }
@@ -2287,6 +2297,95 @@ struct ConfigInstaller {
         }
         let result = lines.joined(separator: "\n")
         return fm.createFile(atPath: configPath, contents: result.data(using: .utf8))
+    }
+
+    // MARK: - Codex desktop-app proxy (LaunchAgent)
+
+    /// Install the Codex proxy script and register it as a LaunchAgent.
+    /// The ChatGPT desktop app's app-server doesn't fire hooks, so this proxy
+    /// polls the Codex state DB and forwards session events to the bridge.
+    @discardableResult
+    static func installCodexProxy(fm: FileManager) -> Bool {
+        // Only install if Codex is present
+        guard fm.fileExists(atPath: codexHome()) else { return true }
+
+        // Resolve python3 path (prefer pyenv, then system python3)
+        let pythonPath: String = {
+            let pyenv = NSHomeDirectory() + "/.pyenv/versions/3.12.0/bin/python3"
+            if fm.fileExists(atPath: pyenv) { return pyenv }
+            if fm.fileExists(atPath: "/usr/bin/python3") { return "/usr/bin/python3" }
+            return "/usr/bin/env python3"
+        }()
+
+        // Copy the bundled proxy script to ~/.codeisland/codex-proxy.py
+        if let bundlePath = Bundle.main.path(forResource: "codex-proxy", ofType: "py") {
+            try? fm.removeItem(atPath: codexProxyPath)
+            try? fm.copyItem(atPath: bundlePath, toPath: codexProxyPath)
+            // Ensure executable
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexProxyPath)
+        } else if !fm.fileExists(atPath: codexProxyPath) {
+            return false
+        }
+
+        // Create the LaunchAgent plist
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>\(codexProxyLabel)</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>\(pythonPath)</string>
+                <string>\(codexProxyPath)</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <true/>
+            <key>StandardOutPath</key>
+            <string>\(codexProxyLogPath)</string>
+            <key>StandardErrorPath</key>
+            <string>\(codexProxyLogPath)</string>
+        </dict>
+        </plist>
+        """
+
+        // Ensure ~/Library/LaunchAgents exists
+        let launchDir = (codexProxyPlistPath as NSString).deletingLastPathComponent
+        try? fm.createDirectory(atPath: launchDir, withIntermediateDirectories: true)
+
+        try? plist.write(toFile: codexProxyPlistPath, atomically: true, encoding: .utf8)
+
+        // Load the LaunchAgent (unload first to handle re-install)
+        let unloadProc = Process()
+        unloadProc.launchPath = "/bin/launchctl"
+        unloadProc.arguments = ["unload", codexProxyPlistPath]
+        try? unloadProc.run()
+        unloadProc.waitUntilExit()
+
+        let loadProc = Process()
+        loadProc.launchPath = "/bin/launchctl"
+        loadProc.arguments = ["load", codexProxyPlistPath]
+        try? loadProc.run()
+        loadProc.waitUntilExit()
+
+        return loadProc.terminationStatus == 0
+    }
+
+    /// Uninstall the Codex proxy LaunchAgent and script.
+    static func uninstallCodexProxy(fm: FileManager) {
+        // Unload the LaunchAgent
+        let unloadProc = Process()
+        unloadProc.launchPath = "/bin/launchctl"
+        unloadProc.arguments = ["unload", codexProxyPlistPath]
+        try? unloadProc.run()
+        unloadProc.waitUntilExit()
+
+        try? fm.removeItem(atPath: codexProxyPlistPath)
+        try? fm.removeItem(atPath: codexProxyPath)
+        try? fm.removeItem(atPath: codexProxyLogPath)
     }
 
     // MARK: - Kimi Code CLI (TOML hooks)
