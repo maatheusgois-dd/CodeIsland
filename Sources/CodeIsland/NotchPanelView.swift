@@ -1703,6 +1703,7 @@ private struct SessionListView: View {
     var onlySessionId: String? = nil
     @AppStorage(SettingsKey.sessionGroupingMode) private var groupingMode = SettingsDefaults.sessionGroupingMode
     @AppStorage(SettingsKey.maxVisibleSessions) private var maxVisibleSessions = SettingsDefaults.maxVisibleSessions
+    @AppStorage(SettingsKey.showUsageStats) private var showUsageStats = SettingsDefaults.showUsageStats
 
     private var groupedSessions: [(header: String, source: String?, ids: [String])] {
         if let only = onlySessionId, appState.sessions[only] != nil {
@@ -1864,9 +1865,67 @@ private struct SessionListView: View {
                 content
             }
 
-            // Full session list only — the completion card stays focused on
-            // the finished session.
+            // Compact one-line usage footer (5h / today + sparkline).
+            if showUsageStats, onlySessionId == nil, let usage = appState.claudeUsage,
+               !(usage.last5h.isEmpty && usage.today.isEmpty) {
+                UsageFooterLine(usage: usage)
+            }
         }
+    }
+}
+
+/// Token totals from the local Claude transcripts — "in" is billed input
+/// (input + cache writes); cache reads live in the tooltip.
+private struct UsageFooterLine: View {
+    let usage: ClaudeUsageScanner.Snapshot
+    @ObservedObject private var l10n = L10n.shared
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "gauge.with.needle")
+                .font(.system(size: 9, weight: .semibold))
+            Text("Claude")
+                .fontWeight(.semibold)
+            Text("5h \(compact(usage.last5h))")
+            Text("·")
+                .foregroundStyle(.white.opacity(0.25))
+            Text("\(l10n["usage_today"]) \(compact(usage.today))")
+            Spacer()
+            UsageSparkline(buckets: usage.hourlyOutputTokens)
+        }
+        .font(.system(size: 10, weight: .medium, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.45))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 5)
+        .help(detail)
+    }
+
+    private func compact(_ t: ClaudeUsageTotals) -> String {
+        "\(ClaudeUsageScanner.formatTokens(t.inputTokens + t.cacheCreationTokens))↑ \(ClaudeUsageScanner.formatTokens(t.outputTokens))↓"
+    }
+
+    private var detail: String {
+        func line(_ label: String, _ t: ClaudeUsageTotals) -> String {
+            "\(label): in \(ClaudeUsageScanner.formatTokens(t.inputTokens)) · out \(ClaudeUsageScanner.formatTokens(t.outputTokens)) · cache write \(ClaudeUsageScanner.formatTokens(t.cacheCreationTokens)) · cache read \(ClaudeUsageScanner.formatTokens(t.cacheReadTokens))"
+        }
+        return line("5h", usage.last5h) + "\n" + line(l10n["usage_today"], usage.today)
+    }
+}
+
+/// Trailing-hours output-token activity, one 2.5pt bar per hour (right = now).
+private struct UsageSparkline: View {
+    let buckets: [Int]
+
+    var body: some View {
+        let peak = max(buckets.max() ?? 0, 1)
+        HStack(alignment: .bottom, spacing: 1.5) {
+            ForEach(Array(buckets.enumerated()), id: \.offset) { _, value in
+                RoundedRectangle(cornerRadius: 0.75)
+                    .fill(.white.opacity(value == 0 ? 0.12 : 0.45))
+                    .frame(width: 2.5, height: max(1.5, CGFloat(value) / CGFloat(peak) * 10))
+            }
+        }
+        .frame(height: 10, alignment: .bottom)
     }
 }
 
