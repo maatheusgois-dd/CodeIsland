@@ -1868,7 +1868,12 @@ private struct SessionListView: View {
             // the finished session.
             if showUsageStats, onlySessionId == nil, let usage = appState.claudeUsage,
                !(usage.last5h.isEmpty && usage.today.isEmpty) {
-                UsageFooterLine(usage: usage)
+                VStack(spacing: 0) {
+                    if !usage.dailyTotals.isEmpty {
+                        UsageHistoryChart(dailyTotals: usage.dailyTotals, scannedAt: usage.scannedAt)
+                    }
+                    UsageFooterLine(usage: usage)
+                }
             }
         }
     }
@@ -1926,6 +1931,83 @@ private struct UsageSparkline: View {
             }
         }
         .frame(height: 10, alignment: .bottom)
+    }
+}
+
+/// 14-day token-usage bar chart — one vertical bar per day, oldest left,
+/// today (rightmost) highlighted in blue. Sits above `UsageFooterLine` in
+/// the session-list footer. `dailyTotals[0]` is 13 days ago, the last
+/// entry is today; `scannedAt` anchors the weekday labels (M T W T F S S).
+private struct UsageHistoryChart: View {
+    let dailyTotals: [ClaudeUsageTotals]
+    let scannedAt: Date
+
+    private static let barWidth: CGFloat = 6
+    private static let barHeight: CGFloat = 24
+    private static let labelHeight: CGFloat = 8
+    private static let daySymbols = ["S", "M", "T", "W", "T", "F", "S"]
+
+    var body: some View {
+        let peak = max(dailyTotals.map { $0.inputTokens + $0.outputTokens }.max() ?? 0, 1)
+        let totalIn = dailyTotals.reduce(0) { $0 + $1.inputTokens + $1.cacheCreationTokens }
+        let totalOut = dailyTotals.reduce(0) { $0 + $1.outputTokens }
+        let todayIndex = dailyTotals.count - 1
+
+        VStack(alignment: .leading, spacing: 2) {
+            // Compact 14-day total: "14d 2.3M↑ 890K↓"
+            HStack(spacing: 4) {
+                Text("14d")
+                    .fontWeight(.semibold)
+                Text("\(ClaudeUsageScanner.formatTokens(totalIn))↑")
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.25))
+                Text("\(ClaudeUsageScanner.formatTokens(totalOut))↓")
+            }
+
+            // Bars + weekday labels, aligned column-per-column so each label
+            // sits directly under its bar.
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(Array(dailyTotals.enumerated()), id: \.offset) { index, day in
+                    let value = day.inputTokens + day.outputTokens
+                    let isToday = index == todayIndex
+                    let height = max(1.5, CGFloat(value) / CGFloat(peak) * Self.barHeight)
+                    VStack(spacing: 1) {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(isToday ? .blue.opacity(0.6) : .white.opacity(0.45))
+                            .frame(width: Self.barWidth, height: height)
+                        Text(weekdayLabel(forOffset: todayIndex - index))
+                            .font(.system(size: 6, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.35))
+                            .frame(width: Self.barWidth, height: Self.labelHeight)
+                    }
+                }
+            }
+            .frame(height: Self.barHeight + Self.labelHeight, alignment: .top)
+        }
+        .font(.system(size: 10, weight: .medium, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.45))
+        .padding(.horizontal, 14)
+        .padding(.top, 4)
+        .help(helpText(totalIn: totalIn, totalOut: totalOut))
+    }
+
+    /// Weekday symbol for the day `offset` days before `scannedAt`
+    /// (0 = today, 1 = yesterday, … 13 = oldest). Uses Calendar so it stays
+    /// correct across month boundaries.
+    private func weekdayLabel(forOffset offset: Int) -> String {
+        let day = Calendar.current.date(byAdding: .day, value: -offset, to: scannedAt) ?? scannedAt
+        let weekday = Calendar.current.component(.weekday, from: day)
+        return Self.daySymbols[weekday - 1]  // weekday is 1..=7 (Sunday=1)
+    }
+
+    private func helpText(totalIn: Int, totalOut: Int) -> String {
+        var lines: [String] = ["14-day token usage"]
+        lines.append("Total in: \(ClaudeUsageScanner.formatTokens(totalIn)) ↑")
+        lines.append("Total out: \(ClaudeUsageScanner.formatTokens(totalOut)) ↓")
+        if let peak = dailyTotals.map({ $0.inputTokens + $0.outputTokens }).max() {
+            lines.append("Peak day: \(ClaudeUsageScanner.formatTokens(peak))")
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -2242,15 +2324,11 @@ private struct SessionCard: View {
                     )
                     // Favorite star — always visible when favorited (gold),
                     // otherwise shows on hover as a dim outline.
-                    Button {
-                        appState.toggleFavorite(sessionId)
-                    } label: {
-                        Image(systemName: appState.isFavorite(sessionId) ? "star.fill" : "star")
-                            .font(.system(size: fontSize - 1, weight: .medium))
-                            .foregroundStyle(appState.isFavorite(sessionId) ? Color.yellow : Color.white.opacity(hovering ? 0.45 : 0))
-                    }
-                    .buttonStyle(.plain)
-                    .help(appState.isFavorite(sessionId) ? "Remove from favorites" : "Add to favorites")
+                    FavoriteStarButton(
+                        isFavorite: appState.isFavorite(sessionId),
+                        hovering: hovering,
+                        toggle: { appState.toggleFavorite(sessionId) }
+                    )
                     Spacer(minLength: 8)
 
                     HStack(spacing: 4) {
@@ -2266,7 +2344,7 @@ private struct SessionCard: View {
                         if session.isYoloMode == true {
                             SessionTag("YOLO", color: Color(red: 1.0, green: 0.35, blue: 0.35))
                         }
-                        SessionTag(timeAgo(session.startTime))
+                        SessionTag(timeAgo(session.startTime), color: .white.opacity(0.6), fillColor: .white.opacity(0.15))
                         TerminalBadge(session: session)
                     }
                 }
@@ -2382,27 +2460,12 @@ private struct SessionCard: View {
 
                     // Working indicator: show what AI is doing right now
                     if session.status != .idle {
-                        HStack(spacing: 4) {
-                            Text("$")
-                                .font(.system(size: fontSize, weight: .bold, design: .monospaced))
-                                .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
-                            if let tool = session.currentTool {
-                                MorphText(
-                                    text: session.toolDescription ?? tool,
-                                    font: .system(size: fontSize, design: .monospaced),
-                                    color: .white.opacity(0.75)
-                                )
-                                .truncationMode(.tail)
-                            } else if session.lastAssistantMessage != nil {
-                                // Session finished a response but hasn't been
-                                // clicked yet — show "Ready" instead of "thinking".
-                                Text("Ready")
-                                    .font(.system(size: fontSize, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(Color(red: 0.4, green: 0.85, blue: 0.5))
-                            } else {
-                                TypingIndicator(fontSize: fontSize, label: "thinking")
-                            }
-                        }
+                        WorkingIndicator(
+                            fontSize: fontSize,
+                            currentTool: session.currentTool,
+                            toolDescription: session.toolDescription,
+                            lastAssistantMessage: session.lastAssistantMessage
+                        )
                     }
                 }
                 .padding(.leading, 4)
@@ -2501,6 +2564,82 @@ private struct SessionCard: View {
         if seconds < 3600 { return "\(seconds / 60)m" }
         if seconds < 86400 { return "\(seconds / 3600)h" }
         return "\(seconds / 86400)d"
+    }
+}
+
+/// Favorite star button — filled gold when favorited, dim outline on hover
+/// otherwise. Slightly larger (12pt) with a hover scale effect and a soft
+/// gold glow when active. Extracted from SessionCard.body to keep the body
+/// expression within the type-checker's budget.
+private struct FavoriteStarButton: View {
+    let isFavorite: Bool
+    let hovering: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button {
+            toggle()
+        } label: {
+            Image(systemName: isFavorite ? "star.fill" : "star")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isFavorite ? Color.yellow : Color.white.opacity(hovering ? 0.5 : 0))
+                .scaleEffect(isFavorite ? 1.0 : (hovering ? 1.1 : 1.0))
+                .shadow(
+                    color: isFavorite ? Color.yellow.opacity(hovering ? 0.55 : 0.3) : .clear,
+                    radius: hovering ? 3 : 1.5
+                )
+                .padding(2)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isFavorite ? "Remove from favorites" : "Add to favorites")
+    }
+}
+
+/// Live working-status line for a session: a colored status dot + "$" prompt +
+/// the current tool name, "Ready", or a thinking shimmer. The dot is white when
+/// a tool is running (e.g. Read), green for Ready, blue (pulsing) for thinking.
+/// Extracted from SessionCard.body to keep the body expression within the
+/// type-checker's budget.
+private struct WorkingIndicator: View {
+    let fontSize: CGFloat
+    let currentTool: String?
+    let toolDescription: String?
+    let lastAssistantMessage: String?
+
+    private var dotColor: Color {
+        if currentTool != nil { return .white }
+        if lastAssistantMessage != nil { return Color(red: 0.4, green: 0.85, blue: 0.5) }
+        return Color(red: 0.4, green: 0.65, blue: 1.0)
+    }
+
+    private var isThinking: Bool {
+        currentTool == nil && lastAssistantMessage == nil
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            StatusDot(color: dotColor, pulsing: isThinking)
+            Text("$")
+                .font(.system(size: fontSize, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color(red: 0.85, green: 0.47, blue: 0.34))
+            if let tool = currentTool {
+                MorphText(
+                    text: toolDescription ?? tool,
+                    font: .system(size: fontSize, design: .monospaced),
+                    color: .white.opacity(0.75)
+                )
+                .truncationMode(.tail)
+            } else if lastAssistantMessage != nil {
+                // Session finished a response but hasn't been clicked yet —
+                // show "Ready" instead of "thinking".
+                Text("Ready")
+                    .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color(red: 0.4, green: 0.85, blue: 0.5))
+            } else {
+                TypingIndicator(fontSize: fontSize, label: "thinking")
+            }
+        }
     }
 }
 
@@ -2725,29 +2864,43 @@ private struct TerminalBadge: View {
                         .foregroundStyle(remoteColor)
                     if let term = session.terminalName {
                         Text(term)
-                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
                             .foregroundStyle(remoteColor)
                     }
                 }
                 .padding(.horizontal, 6)
-                .padding(.vertical, 3)
+                .padding(.vertical, 2)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(remoteColor.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(remoteColor.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(remoteColor.opacity(0.3), lineWidth: 0.5)
                 )
             } else {
                 HStack(spacing: 3) {
                     if let icon = termIcon {
                         Image(nsImage: icon)
                             .resizable()
-                            .frame(width: 13, height: 13)
+                            .frame(width: 12, height: 12)
                     }
                     if let term = session.terminalName {
                         Text(term)
-                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.5))
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.55))
                     }
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
+                )
             }
         }
     }
@@ -2928,24 +3081,67 @@ private func monogramIcon(for source: String, size: CGFloat) -> NSImage {
     return image
 }
 
+/// Small colored status dot for the working indicator: white when a tool is
+/// running (e.g. Read), green for Ready, blue for thinking. When `pulsing` is
+/// true (thinking), a soft blurred halo breathes around the dot.
+private struct StatusDot: View {
+    let color: Color
+    var pulsing: Bool = false
+
+    @State private var pulse: Double = 0.5
+
+    var body: some View {
+        ZStack {
+            if pulsing {
+                Circle()
+                    .fill(color.opacity(0.5))
+                    .frame(width: 5, height: 5)
+                    .blur(radius: 1.5)
+                    .scaleEffect(1.0 + CGFloat(pulse) * 0.6)
+                    .opacity(0.4 + (1.0 - pulse) * 0.3)
+            }
+            Circle()
+                .fill(color)
+                .frame(width: 5, height: 5)
+                .shadow(color: color.opacity(0.7), radius: 2)
+        }
+        .onAppear {
+            guard pulsing else { return }
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                pulse = 0.0
+            }
+        }
+    }
+}
+
 private struct SessionTag: View {
     let text: String
     var color: Color = .white.opacity(0.7)
+    // Optional explicit fill for the pill background. When nil, the fill is
+    // derived from `color` at 12% opacity (the original behavior). Pass an
+    // explicit Color (e.g. `.white.opacity(0.15)`) for badges that should have
+    // a neutral, label-independent background like the time-ago badge.
+    var fillColor: Color? = nil
 
-    init(_ text: String, color: Color = .white.opacity(0.7)) {
+    init(_ text: String, color: Color = .white.opacity(0.7), fillColor: Color? = nil) {
         self.text = text
         self.color = color
+        self.fillColor = fillColor
     }
 
     var body: some View {
         Text(text)
-            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+            .font(.system(size: 9, weight: .medium, design: .monospaced))
             .foregroundStyle(color)
             .padding(.horizontal, 6)
-            .padding(.vertical, 3)
+            .padding(.vertical, 2)
             .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(color.opacity(0.12))
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill((fillColor ?? color.opacity(0.12)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(color.opacity(0.18), lineWidth: 0.5)
             )
     }
 }

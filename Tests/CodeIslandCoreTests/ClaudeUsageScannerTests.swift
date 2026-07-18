@@ -3,11 +3,15 @@ import XCTest
 
 final class ClaudeUsageScannerTests: XCTestCase {
     private var home: String!
+    private var ompHome: String!
 
     override func setUpWithError() throws {
         home = NSTemporaryDirectory() + "usage-tests-" + UUID().uuidString
         try FileManager.default.createDirectory(
             atPath: home + "/projects/p1", withIntermediateDirectories: true)
+        // OMP scanning is on by default; point it at a nonexistent dir so the
+        // fixtures stay isolated from the user's real ~/.omp transcripts.
+        ompHome = home + "/no-omp"
     }
 
     override func tearDown() {
@@ -61,7 +65,7 @@ final class ClaudeUsageScannerTests: XCTestCase {
         try lines.joined(separator: "\n")
             .write(toFile: home + "/projects/p1/s.jsonl", atomically: true, encoding: .utf8)
 
-        let snap = ClaudeUsageScanner.scan(claudeHome: home, now: now)
+        let snap = ClaudeUsageScanner.scan(claudeHome: home, ompHome: ompHome, now: now)
 
         XCTAssertEqual(snap.last5h.inputTokens, 100)
         XCTAssertEqual(snap.last5h.outputTokens, 10)
@@ -85,7 +89,7 @@ final class ClaudeUsageScannerTests: XCTestCase {
             .write(toFile: path, atomically: true, encoding: .utf8)
 
         var cache = ClaudeUsageScanner.FileCache()
-        let first = ClaudeUsageScanner.scan(claudeHome: home, now: now, cache: &cache)
+        let first = ClaudeUsageScanner.scan(claudeHome: home, ompHome: ompHome, now: now, cache: &cache)
         XCTAssertEqual(first.last5h.inputTokens, 100)
         let consumedAfterFirst = try XCTUnwrap(cache.files[path]?.consumedBytes)
         XCTAssertGreaterThan(consumedAfterFirst, 0)
@@ -96,7 +100,7 @@ final class ClaudeUsageScannerTests: XCTestCase {
         handle.write(Data((assistantLine(id: "b", at: now.addingTimeInterval(-1800), input: 7, output: 3) + "\n").utf8))
         handle.closeFile()
 
-        let second = ClaudeUsageScanner.scan(claudeHome: home, now: now, cache: &cache)
+        let second = ClaudeUsageScanner.scan(claudeHome: home, ompHome: ompHome, now: now, cache: &cache)
         XCTAssertEqual(second.last5h.inputTokens, 107)
         XCTAssertEqual(second.last5h.messageCount, 2)
         XCTAssertGreaterThan(try XCTUnwrap(cache.files[path]?.consumedBytes), consumedAfterFirst)
@@ -110,7 +114,7 @@ final class ClaudeUsageScannerTests: XCTestCase {
         try (full + partial).write(toFile: path, atomically: true, encoding: .utf8)
 
         var cache = ClaudeUsageScanner.FileCache()
-        let snap = ClaudeUsageScanner.scan(claudeHome: home, now: now, cache: &cache)
+        let snap = ClaudeUsageScanner.scan(claudeHome: home, ompHome: ompHome, now: now, cache: &cache)
         XCTAssertEqual(snap.last5h.messageCount, 1)
         // Offset stops at the last complete line so the partial line is retried.
         XCTAssertEqual(cache.files[path]?.consumedBytes, UInt64(full.utf8.count))
@@ -124,19 +128,19 @@ final class ClaudeUsageScannerTests: XCTestCase {
             .write(toFile: path, atomically: true, encoding: .utf8)
 
         var cache = ClaudeUsageScanner.FileCache()
-        _ = ClaudeUsageScanner.scan(claudeHome: home, now: now, cache: &cache)
+        _ = ClaudeUsageScanner.scan(claudeHome: home, ompHome: ompHome, now: now, cache: &cache)
 
         // Replace with a shorter file (e.g. transcript rewritten).
         try (assistantLine(id: "c", at: now.addingTimeInterval(-600), input: 1, output: 2) + "\n")
             .write(toFile: path, atomically: true, encoding: .utf8)
 
-        let snap = ClaudeUsageScanner.scan(claudeHome: home, now: now, cache: &cache)
+        let snap = ClaudeUsageScanner.scan(claudeHome: home, ompHome: ompHome, now: now, cache: &cache)
         XCTAssertEqual(snap.last5h.inputTokens, 1)
         XCTAssertEqual(snap.last5h.messageCount, 1)
     }
 
     func testScanEmptyHome() {
-        let snap = ClaudeUsageScanner.scan(claudeHome: home + "/nonexistent", now: noon)
+        let snap = ClaudeUsageScanner.scan(claudeHome: home + "/nonexistent", ompHome: ompHome, now: noon)
         XCTAssertTrue(snap.last5h.isEmpty)
         XCTAssertTrue(snap.today.isEmpty)
     }

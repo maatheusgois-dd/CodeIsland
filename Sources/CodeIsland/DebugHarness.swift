@@ -226,8 +226,27 @@ enum DebugHarness {
             last5h: fiveH,
             today: today,
             hourlyOutputTokens: [0, 0, 4200, 18_000, 9500, 0, 22_000, 41_000, 12_000, 30_500, 52_000, 17_500],
+            dailyTotals: previewDailyTotals(today: today),
             scannedAt: Date()
         )
+    }
+    /// 14 days of synthetic token usage for the preview chart — weekdays busier
+    /// than weekends, today echoing the supplied totals, older days trailing
+    /// off. Index 0 is 13 days ago, the last entry is today.
+    private static func previewDailyTotals(today: ClaudeUsageTotals) -> [ClaudeUsageTotals] {
+        let baseOutput: [Int] = [8_000, 12_500, 0, 21_000, 33_000, 19_000, 4_500,
+                                 14_000, 27_500, 0, 38_000, 22_000, 11_500]
+        var days: [ClaudeUsageTotals] = baseOutput.map { out in
+            var t = ClaudeUsageTotals()
+            t.inputTokens = Int(Double(out) * 1.75)
+            t.outputTokens = out
+            t.cacheCreationTokens = Int(Double(out) * 0.6)
+            t.cacheReadTokens = Int(Double(out) * 16)
+            t.messageCount = max(1, out / 2_500)
+            return t
+        }
+        days.append(today)
+        return days
     }
 
     private static func applyBusy(to state: AppState) {

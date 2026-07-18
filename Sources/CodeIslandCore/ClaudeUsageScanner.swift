@@ -20,13 +20,22 @@ public struct ClaudeUsageTotals: Equatable, Sendable {
     }
 }
 
-/// Token-usage aggregation over the local Claude Code transcripts
-/// (~/.claude/projects/**/*.jsonl) — local-first, no provider API calls.
-/// Every assistant line carries `message.usage`; `message.id` repeats across
-/// tool-use continuation lines of the same API response, so totals dedupe on it.
+/// Token-usage aggregation over local transcripts — local-first, no provider
+/// API calls. Two sources are merged:
+///   • Claude Code: `~/.claude/projects/**/*.jsonl` — assistant lines carry
+///     `message.usage` with `input_tokens`/`output_tokens`/`cache_*_input_tokens`.
+///   • OMP: `~/.omp/agent/sessions/**/*.jsonl` — `type:"message"` lines carry
+///     `message.usage` with `input`/`output`/`cacheRead`/`cacheWrite`.
+/// Every assistant line carries `message.usage`; `message.id` (Claude) or the
+/// top-level `id` (OMP) repeats across tool-use continuation lines of the same
+/// API response, so totals dedupe on it — per file, since ids never straddle
+/// files (Claude UUIDs are global; OMP short hex are unique within a session).
 public enum ClaudeUsageScanner {
     /// Sparkline resolution: one bucket per hour, oldest first.
     public static let sparklineHours = 12
+
+    /// History resolution: one bucket per day, oldest first.
+    public static let historyDays = 14
 
     public struct Snapshot: Equatable, Sendable {
         public let last5h: ClaudeUsageTotals
@@ -34,12 +43,23 @@ public enum ClaudeUsageScanner {
         /// Output tokens per hour for the trailing `sparklineHours` hours,
         /// index 0 oldest, last index = the current hour.
         public let hourlyOutputTokens: [Int]
+        /// Daily totals for the trailing `historyDays` days. `dailyTotals[0]`
+        /// is 13 days ago (midnight-to-midnight), `dailyTotals[last]` is
+        /// today. Merges Claude Code and OMP usage.
+        public let dailyTotals: [ClaudeUsageTotals]
         public let scannedAt: Date
 
-        public init(last5h: ClaudeUsageTotals, today: ClaudeUsageTotals, hourlyOutputTokens: [Int], scannedAt: Date) {
+        public init(
+            last5h: ClaudeUsageTotals,
+            today: ClaudeUsageTotals,
+            hourlyOutputTokens: [Int],
+            dailyTotals: [ClaudeUsageTotals] = [],
+            scannedAt: Date
+        ) {
             self.last5h = last5h
             self.today = today
             self.hourlyOutputTokens = hourlyOutputTokens
+            self.dailyTotals = dailyTotals
             self.scannedAt = scannedAt
         }
     }
@@ -67,31 +87,86 @@ public enum ClaudeUsageScanner {
     /// One-shot convenience (tests, callers without persistent state).
     public static func scan(
         claudeHome: String = NSHomeDirectory() + "/.claude",
+        ompHome: String = NSHomeDirectory() + "/.omp",
         now: Date = Date()
     ) -> Snapshot {
         var cache = FileCache()
-        return scan(claudeHome: claudeHome, now: now, cache: &cache)
+        return scan(claudeHome: claudeHome, ompHome: ompHome, now: now, cache: &cache)
     }
 
     public static func scan(
         claudeHome: String = NSHomeDirectory() + "/.claude",
+        ompHome: String = NSHomeDirectory() + "/.omp",
         now: Date = Date(),
         cache: inout FileCache
     ) -> Snapshot {
+        let calendar = Calendar.current
         let fiveHoursAgo = now.addingTimeInterval(-5 * 3600)
-        let midnight = Calendar.current.startOfDay(for: now)
+        let midnight = calendar.startOfDay(for: now)
         let sparklineStart = now.addingTimeInterval(-Double(sparklineHours) * 3600)
-        let cutoff = min(fiveHoursAgo, midnight, sparklineStart)
+        let historyStart = midnight.addingTimeInterval(-Double(historyDays - 1) * 86_400)
+        let cutoff = min(fiveHoursAgo, midnight, sparklineStart, historyStart)
 
         var last5h = ClaudeUsageTotals()
         var today = ClaudeUsageTotals()
         var hourly = [Int](repeating: 0, count: sparklineHours)
+        // daily[0] = 13 days ago, daily[last] = today.
+        var daily = [ClaudeUsageTotals](repeating: ClaudeUsageTotals(), count: historyDays)
         var activeFiles = Set<String>()
 
         let fm = FileManager.default
-        let projectsDir = claudeHome + "/projects"
-        for project in (try? fm.contentsOfDirectory(atPath: projectsDir)) ?? [] {
-            let projectPath = projectsDir + "/" + project
+        // Claude: ~/.claude/projects/<project>/<file>.jsonl
+        // OMP:    ~/.omp/agent/sessions/<project>/<file>.jsonl
+        let sources: [(root: String, parser: (String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)?)] = [
+            (claudeHome + "/projects", parseAssistantUsage),
+            (ompHome + "/agent/sessions", parseOMPUsage),
+        ]
+        for source in sources {
+            enumerateProjects(
+                root: source.root, parser: source.parser, fm: fm,
+                cutoff: cutoff, cache: &cache, activeFiles: &activeFiles)
+        }
+
+        func tally(_ message: FileCache.CachedMessage) {
+            guard message.timestamp <= now else { return }
+            if message.timestamp >= fiveHoursAgo { last5h.add(message.usage) }
+            if message.timestamp >= midnight { today.add(message.usage) }
+            let hoursAgo = Int(now.timeIntervalSince(message.timestamp) / 3600)
+            if hoursAgo >= 0 && hoursAgo < sparklineHours {
+                hourly[sparklineHours - 1 - hoursAgo] += message.usage.outputTokens
+            }
+            let messageDay = calendar.startOfDay(for: message.timestamp)
+            let daysAgo = Int(midnight.timeIntervalSince(messageDay) / 86_400)
+            if daysAgo >= 0 && daysAgo < historyDays {
+                daily[historyDays - 1 - daysAgo].add(message.usage)
+            }
+        }
+
+        // Files that fell out of the mtime window carry no in-window entries.
+        cache.files = cache.files.filter { activeFiles.contains($0.key) }
+        for entry in cache.files.values {
+            for message in entry.entries where message.timestamp >= cutoff {
+                tally(message)
+            }
+        }
+        return Snapshot(
+            last5h: last5h, today: today,
+            hourlyOutputTokens: hourly, dailyTotals: daily, scannedAt: now)
+    }
+
+    /// Walk one source tree, incrementally parse new bytes past each file's
+    /// cached offset, prune entries older than `cutoff`, and record active
+    /// paths so dropped files can be evicted from the cache afterwards.
+    private static func enumerateProjects(
+        root: String,
+        parser: (String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)?,
+        fm: FileManager,
+        cutoff: Date,
+        cache: inout FileCache,
+        activeFiles: inout Set<String>
+    ) {
+        for project in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
+            let projectPath = root + "/" + project
             for file in (try? fm.contentsOfDirectory(atPath: projectPath)) ?? [] {
                 guard file.hasSuffix(".jsonl") else { continue }
                 let path = projectPath + "/" + file
@@ -109,29 +184,22 @@ public enum ClaudeUsageScanner {
                     entry = FileCache.FileEntry()
                 }
                 if size > entry.consumedBytes {
-                    consumeNewLines(path: path, into: &entry)
+                    consumeNewLines(path: path, parser: parser, into: &entry)
                 }
                 entry.entries.removeAll { $0.timestamp < cutoff }
                 cache.files[path] = entry
-
-                for message in entry.entries where message.timestamp <= now {
-                    if message.timestamp >= fiveHoursAgo { last5h.add(message.usage) }
-                    if message.timestamp >= midnight { today.add(message.usage) }
-                    let hoursAgo = Int(now.timeIntervalSince(message.timestamp) / 3600)
-                    if hoursAgo >= 0 && hoursAgo < sparklineHours {
-                        hourly[sparklineHours - 1 - hoursAgo] += message.usage.outputTokens
-                    }
-                }
             }
         }
-        // Files that fell out of the mtime window carry no in-window entries.
-        cache.files = cache.files.filter { activeFiles.contains($0.key) }
-        return Snapshot(last5h: last5h, today: today, hourlyOutputTokens: hourly, scannedAt: now)
     }
 
     /// Read bytes past `entry.consumedBytes` and parse the COMPLETE lines only —
     /// a partial trailing line (writer mid-append) is left for the next scan.
-    private static func consumeNewLines(path: String, into entry: inout FileCache.FileEntry) {
+    /// `parser` selects the source-specific line shape (Claude vs OMP).
+    private static func consumeNewLines(
+        path: String,
+        parser: (String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)?,
+        into entry: inout FileCache.FileEntry
+    ) {
         guard let handle = FileHandle(forReadingAtPath: path) else { return }
         defer { handle.closeFile() }
         handle.seek(toFileOffset: entry.consumedBytes)
@@ -142,7 +210,7 @@ public enum ClaudeUsageScanner {
         guard let text = String(data: consumable, encoding: .utf8) else { return }
 
         for line in text.split(separator: "\n") {
-            guard let parsed = parseAssistantUsage(String(line)),
+            guard let parsed = parser(String(line)),
                   !entry.seenIds.contains(parsed.messageId) else { continue }
             entry.seenIds.insert(parsed.messageId)
             entry.entries.append(.init(timestamp: parsed.timestamp, usage: parsed.usage))
@@ -169,6 +237,34 @@ public enum ClaudeUsageScanner {
         totals.outputTokens = usage["output_tokens"] as? Int ?? 0
         totals.cacheCreationTokens = usage["cache_creation_input_tokens"] as? Int ?? 0
         totals.cacheReadTokens = usage["cache_read_input_tokens"] as? Int ?? 0
+        totals.messageCount = 1
+        return (timestamp, messageId, totals)
+    }
+
+    /// Parse one OMP transcript line into (timestamp, message id, usage) — nil
+    /// for non-`message` lines and lines without usage. OMP's schema differs
+    /// from Claude's: `type` is `"message"` (not `"assistant"`), the dedupe id
+    /// is the top-level `id` (not `message.id`), and `message.usage` uses
+    /// `input`/`output`/`cacheRead`/`cacheWrite` keys (no `_tokens` suffix).
+    static func parseOMPUsage(_ line: String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)? {
+        // Cheap pre-filter before full JSON decoding.
+        guard line.contains("\"message\""), line.contains("\"usage\"") else { return nil }
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["type"] as? String == "message",
+              let timestampRaw = obj["timestamp"] as? String,
+              let timestamp = parseISO8601(timestampRaw),
+              let messageId = obj["id"] as? String,
+              let message = obj["message"] as? [String: Any],
+              let usage = message["usage"] as? [String: Any]
+        else { return nil }
+
+        var totals = ClaudeUsageTotals()
+        totals.inputTokens = usage["input"] as? Int ?? 0
+        totals.outputTokens = usage["output"] as? Int ?? 0
+        // OMP's `cacheWrite` maps to Claude's cache-creation bucket.
+        totals.cacheCreationTokens = usage["cacheWrite"] as? Int ?? 0
+        totals.cacheReadTokens = usage["cacheRead"] as? Int ?? 0
         totals.messageCount = 1
         return (timestamp, messageId, totals)
     }
