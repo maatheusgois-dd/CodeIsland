@@ -12,6 +12,7 @@ enum SettingsPage: String, Identifiable, Hashable {
     case mascots
     case sound
     case shortcuts
+    case usage
     case remote
     case hooks
     case buddy
@@ -27,6 +28,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .mascots: return "person.2.fill"
         case .sound: return "speaker.wave.2.fill"
         case .shortcuts: return "command.circle.fill"
+        case .usage: return "chart.bar.fill"
         case .remote: return "network"
         case .hooks: return "link.circle.fill"
         case .buddy: return "dot.radiowaves.left.and.right"
@@ -42,6 +44,7 @@ enum SettingsPage: String, Identifiable, Hashable {
         case .mascots: return .pink
         case .sound: return .green
         case .shortcuts: return .indigo
+        case .usage: return .teal
         case .remote: return .mint
         case .hooks: return .purple
         case .buddy: return .red
@@ -56,7 +59,7 @@ private struct SidebarGroup: Hashable {
 }
 
 private let sidebarGroups: [SidebarGroup] = [
-    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound, .shortcuts]),
+    SidebarGroup(title: nil, pages: [.general, .behavior, .appearance, .mascots, .sound, .shortcuts, .usage]),
     SidebarGroup(title: "CodeIsland", pages: [.remote, .hooks, .buddy, .about]),
 ]
 
@@ -94,6 +97,7 @@ struct SettingsView: View {
                 case .mascots: MascotsPage()
                 case .sound: SoundPage()
                 case .shortcuts: ShortcutsPage()
+                case .usage: UsagePage(appState: appState)
                 case .remote: RemoteHostsPage()
                 case .hooks: HooksPage()
                 case .buddy: BuddyPage()
@@ -2378,6 +2382,193 @@ private struct ShortcutsPage: View {
         if let delegate = NSApp.delegate as? AppDelegate {
             delegate.setupGlobalShortcut()
         }
+    }
+}
+
+// MARK: - Usage / Token History Page
+
+private struct UsagePage: View {
+    let appState: AppState?
+    @ObservedObject private var l10n = L10n.shared
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // Header
+                HStack(spacing: 10) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.title2)
+                        .foregroundStyle(.teal)
+                    Text("Token Usage History")
+                        .font(.title2.bold())
+                }
+                .padding(.bottom, 5)
+
+                if let usage = appState?.claudeUsage {
+                    // 14-day summary
+                    UsageSummaryCard(dailyTotals: usage.dailyTotals)
+
+                    // 14-day bar chart
+                    UsageHistoryCard(dailyTotals: usage.dailyTotals, scannedAt: usage.scannedAt)
+
+                    // Today and 5h breakdown
+                    UsageBreakdownCard(last5h: usage.last5h, today: usage.today)
+
+                    // Hourly sparkline (last 12h)
+                    if !usage.hourlyOutputTokens.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Last 12 Hours (Output Tokens)")
+                                .font(.headline)
+                            UsageSparklineLarge(buckets: usage.hourlyOutputTokens)
+                        }
+                        .padding()
+                        .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+                    }
+                } else {
+                    ContentUnavailableView(
+                        "No Usage Data",
+                        systemImage: "chart.bar",
+                        description: Text("Token usage data will appear here once you use Claude Code or OMP sessions.")
+                    )
+                }
+
+                Spacer()
+            }
+            .padding(24)
+        }
+        .onAppear { appState?.refreshClaudeUsageIfStale() }
+    }
+}
+
+private struct UsageSummaryCard: View {
+    let dailyTotals: [ClaudeUsageTotals]
+
+    var body: some View {
+        let totalIn = dailyTotals.reduce(0) { $0 + $1.inputTokens + $1.cacheCreationTokens }
+        let totalOut = dailyTotals.reduce(0) { $0 + $1.outputTokens }
+        let totalCache = dailyTotals.reduce(0) { $0 + $1.cacheReadTokens }
+        let totalMessages = dailyTotals.reduce(0) { $0 + $1.messageCount }
+
+        VStack(alignment: .leading, spacing: 12) {
+            Text("14-Day Summary")
+                .font(.headline)
+            HStack(spacing: 24) {
+                UsageMetric(label: "Input", value: ClaudeUsageScanner.formatTokens(totalIn), color: .blue)
+                UsageMetric(label: "Output", value: ClaudeUsageScanner.formatTokens(totalOut), color: .teal)
+                UsageMetric(label: "Cache Read", value: ClaudeUsageScanner.formatTokens(totalCache), color: .orange)
+                UsageMetric(label: "Messages", value: "\(totalMessages)", color: .secondary)
+            }
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+    }
+}
+
+private struct UsageMetric: View {
+    let label: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(.title3, design: .monospaced).bold())
+                .foregroundStyle(color)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct UsageHistoryCard: View {
+    let dailyTotals: [ClaudeUsageTotals]
+    let scannedAt: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Daily Usage (14 Days)")
+                .font(.headline)
+            UsageHistoryBars(dailyTotals: dailyTotals, scannedAt: scannedAt)
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+    }
+}
+
+private struct UsageHistoryBars: View {
+    let dailyTotals: [ClaudeUsageTotals]
+    let scannedAt: Date
+
+    var body: some View {
+        let peak = max(dailyTotals.map { $0.inputTokens + $0.outputTokens }.max() ?? 0, 1)
+        let cal = Calendar.current
+        let weekdays = ["S", "M", "T", "W", "T", "F", "S"]
+
+        HStack(alignment: .bottom, spacing: 4) {
+            ForEach(Array(dailyTotals.enumerated()), id: \.offset) { idx, total in
+                let totalTokens = total.inputTokens + total.outputTokens
+                let date = cal.date(byAdding: .day, value: -(dailyTotals.count - 1 - idx), to: cal.startOfDay(for: scannedAt)) ?? scannedAt
+                let weekday = weekdays[cal.component(.weekday, from: date) - 1]
+                let isToday = idx == dailyTotals.count - 1
+
+                VStack(spacing: 3) {
+                    Text(totalTokens > 0 ? ClaudeUsageScanner.formatTokens(totalTokens) : "")
+                        .font(.system(size: 7, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(isToday ? Color.teal.opacity(0.8) : Color.teal.opacity(0.35))
+                        .frame(width: 18, height: max(2, CGFloat(totalTokens) / CGFloat(peak) * 80))
+                    Text(weekday)
+                        .font(.system(size: 8))
+                        .foregroundStyle(isToday ? .teal : .secondary)
+                }
+                .help("\(cal.component(.month, from: date))/\(cal.component(.day, from: date)): in \(ClaudeUsageScanner.formatTokens(total.inputTokens)) · out \(ClaudeUsageScanner.formatTokens(total.outputTokens))")
+            }
+        }
+        .frame(height: 100, alignment: .bottom)
+    }
+}
+
+private struct UsageBreakdownCard: View {
+    let last5h: ClaudeUsageTotals
+    let today: ClaudeUsageTotals
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Today Breakdown")
+                .font(.headline)
+            HStack(spacing: 20) {
+                VStack(alignment: .leading) {
+                Text("Last 5 Hours").font(.caption).foregroundStyle(.secondary)
+                    Text("\(ClaudeUsageScanner.formatTokens(last5h.inputTokens + last5h.cacheCreationTokens))↑ \(ClaudeUsageScanner.formatTokens(last5h.outputTokens))↓")
+                        .font(.system(.body, design: .monospaced))
+                }
+                VStack(alignment: .leading) {
+                Text("Today").font(.caption).foregroundStyle(.secondary)
+                    Text("\(ClaudeUsageScanner.formatTokens(today.inputTokens + today.cacheCreationTokens))↑ \(ClaudeUsageScanner.formatTokens(today.outputTokens))↓")
+                        .font(.system(.body, design: .monospaced))
+                }
+            }
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+    }
+}
+
+private struct UsageSparklineLarge: View {
+    let buckets: [Int]
+
+    var body: some View {
+        let peak = max(buckets.max() ?? 0, 1)
+        HStack(alignment: .bottom, spacing: 4) {
+            ForEach(Array(buckets.enumerated()), id: \.offset) { _, value in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(value == 0 ? Color.gray.opacity(0.2) : Color.teal.opacity(0.6))
+                    .frame(width: 12, height: max(2, CGFloat(value) / CGFloat(peak) * 60))
+            }
+        }
+        .frame(height: 60, alignment: .bottom)
     }
 }
 
