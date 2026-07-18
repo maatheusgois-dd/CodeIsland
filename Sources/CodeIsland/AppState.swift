@@ -894,6 +894,23 @@ final class AppState {
         }
     }
 
+    /// Force a usage scan regardless of showUsageStats toggle (for Settings Usage page).
+    func scanClaudeUsage() {
+        guard !usageScanInFlight else { return }
+        if let scannedAt = claudeUsage?.scannedAt, Date().timeIntervalSince(scannedAt) < 10 { return }
+        usageScanInFlight = true
+        let cacheCopy = usageFileCache
+        Task.detached(priority: .utility) {
+            var cache = cacheCopy
+            let snapshot = ClaudeUsageScanner.scan(cache: &cache)
+            await MainActor.run { [weak self] in
+                self?.claudeUsage = snapshot
+                self?.usageFileCache = cache
+                self?.usageScanInFlight = false
+            }
+        }
+    }
+
     /// Last unresolved-branch probe per session — keeps `gitBranch == nil`
     /// (non-repo cwds, SessionStart snapshot rebuilds) from probing on every event.
     private var gitBranchCheckedAt: [String: Date] = [:]

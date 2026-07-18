@@ -2436,7 +2436,7 @@ private struct UsagePage: View {
             }
             .padding(24)
         }
-        .onAppear { appState?.refreshClaudeUsageIfStale() }
+        .onAppear { appState?.scanClaudeUsage() }
     }
 }
 
