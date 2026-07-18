@@ -559,6 +559,7 @@ private struct CompactRightWing: View {
                     soundEnabled.toggle()
                 }
                 NotchIconButton(icon: "gearshape", tooltip: l10n["settings"]) {
+                    appState.surface = .collapsed
                     SettingsWindowController.shared.show()
                 }
                 NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.4, blue: 0.4), tooltip: l10n["quit"]) {
