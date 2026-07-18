@@ -173,6 +173,12 @@ struct ConfigInstaller {
     private static let codexProxyPlistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.codeisland.codex-proxy.plist"
     private static let codexProxyLogPath = codeislandDir + "/codex-proxy.log"
     private static let codexProxyLabel = "com.codeisland.codex-proxy"
+    // OMP proxy: sessions started before extension install don't get native hooks,
+    // so a LaunchAgent polls JSONL transcripts and forwards events to the bridge.
+    private static let ompProxyPath = codeislandDir + "/omp-proxy.py"
+    private static let ompProxyPlistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.codeisland.omp-proxy.plist"
+    private static let ompProxyLogPath = codeislandDir + "/omp-proxy.log"
+    private static let ompProxyLabel = "com.codeisland.omp-proxy"
 
 
     // Legacy paths for migration cleanup (#32)
@@ -800,6 +806,8 @@ struct ConfigInstaller {
         // Install Oh My Pi / OMP extension
         if isEnabled(source: "omp") {
             if !installOmpExtension(fm: fm) { ok = false }
+            // Install OMP proxy for sessions started before the extension
+            installOmpProxy(fm: fm)
         }
 
         // Install OpenClaw plugin
@@ -829,6 +837,7 @@ struct ConfigInstaller {
                 uninstallPiExtension(fm: fm)
             } else if cli.source == "omp" {
                 uninstallOmpExtension(fm: fm)
+                uninstallOmpProxy(fm: fm)
             } else if cli.source == "openclaw" {
                 uninstallOpenclawPlugin(fm: fm)
             } else {
@@ -2386,6 +2395,88 @@ struct ConfigInstaller {
         try? fm.removeItem(atPath: codexProxyPlistPath)
         try? fm.removeItem(atPath: codexProxyPath)
         try? fm.removeItem(atPath: codexProxyLogPath)
+    }
+
+    // MARK: - OMP proxy (LaunchAgent)
+
+    /// Install the OMP proxy script and register it as a LaunchAgent.
+    /// Sessions started before the CodeIsland extension was installed don't
+    /// get native hook events. This proxy polls JSONL transcripts to detect
+    /// activity and forwards events to the bridge.
+    @discardableResult
+    static func installOmpProxy(fm: FileManager) -> Bool {
+        let ompDir = NSHomeDirectory() + "/.omp/agent/sessions"
+        guard fm.fileExists(atPath: ompDir) else { return true }
+
+        let pythonPath: String = {
+            let pyenv = NSHomeDirectory() + "/.pyenv/versions/3.12.0/bin/python3"
+            if fm.fileExists(atPath: pyenv) { return pyenv }
+            if fm.fileExists(atPath: "/usr/bin/python3") { return "/usr/bin/python3" }
+            return "/usr/bin/env python3"
+        }()
+
+        if let bundlePath = Bundle.main.path(forResource: "omp-proxy", ofType: "py") {
+            try? fm.removeItem(atPath: ompProxyPath)
+            try? fm.copyItem(atPath: bundlePath, toPath: ompProxyPath)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ompProxyPath)
+        } else if !fm.fileExists(atPath: ompProxyPath) {
+            return false
+        }
+
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>\(ompProxyLabel)</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>\(pythonPath)</string>
+                <string>\(ompProxyPath)</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <true/>
+            <key>StandardOutPath</key>
+            <string>\(ompProxyLogPath)</string>
+            <key>StandardErrorPath</key>
+            <string>\(ompProxyLogPath)</string>
+        </dict>
+        </plist>
+        """
+
+        let launchDir = (ompProxyPlistPath as NSString).deletingLastPathComponent
+        try? fm.createDirectory(atPath: launchDir, withIntermediateDirectories: true)
+        try? plist.write(toFile: ompProxyPlistPath, atomically: true, encoding: .utf8)
+
+        let unloadProc = Process()
+        unloadProc.launchPath = "/bin/launchctl"
+        unloadProc.arguments = ["unload", ompProxyPlistPath]
+        try? unloadProc.run()
+        unloadProc.waitUntilExit()
+
+        let loadProc = Process()
+        loadProc.launchPath = "/bin/launchctl"
+        loadProc.arguments = ["load", ompProxyPlistPath]
+        try? loadProc.run()
+        loadProc.waitUntilExit()
+
+        return loadProc.terminationStatus == 0
+    }
+
+    /// Uninstall the OMP proxy LaunchAgent and script.
+    static func uninstallOmpProxy(fm: FileManager) {
+        let unloadProc = Process()
+        unloadProc.launchPath = "/bin/launchctl"
+        unloadProc.arguments = ["unload", ompProxyPlistPath]
+        try? unloadProc.run()
+        unloadProc.waitUntilExit()
+
+        try? fm.removeItem(atPath: ompProxyPlistPath)
+        try? fm.removeItem(atPath: ompProxyPath)
+        try? fm.removeItem(atPath: ompProxyLogPath)
     }
 
     // MARK: - Kimi Code CLI (TOML hooks)
