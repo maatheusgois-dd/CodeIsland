@@ -2420,7 +2420,9 @@ private struct UsagePage: View {
                             Text("Last 12 Hours (Output Tokens)")
                                 .font(.headline)
                             UsageSparklineLarge(buckets: usage.hourlyOutputTokens)
+                                .frame(maxWidth: .infinity)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding()
                         .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
                     }
@@ -2457,8 +2459,10 @@ private struct UsageSummaryCard: View {
                 UsageMetric(label: "Output", value: ClaudeUsageScanner.formatTokens(totalOut), color: .teal)
                 UsageMetric(label: "Cache Read", value: ClaudeUsageScanner.formatTokens(totalCache), color: .orange)
                 UsageMetric(label: "Messages", value: "\(totalMessages)", color: .secondary)
+                Spacer()
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
     }
@@ -2484,13 +2488,14 @@ private struct UsageMetric: View {
 private struct UsageHistoryCard: View {
     let dailyTotals: [ClaudeUsageTotals]
     let scannedAt: Date
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Daily Usage (14 Days)")
                 .font(.headline)
             UsageHistoryBars(dailyTotals: dailyTotals, scannedAt: scannedAt)
+                .frame(maxWidth: .infinity)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
     }
@@ -2544,6 +2549,7 @@ private struct UsageBreakdownCard: View {
                     Text("\(ClaudeUsageScanner.formatTokens(last5h.inputTokens + last5h.cacheCreationTokens))↑ \(ClaudeUsageScanner.formatTokens(last5h.outputTokens))↓")
                         .font(.system(.body, design: .monospaced))
                 }
+                Spacer()
                 VStack(alignment: .leading) {
                 Text("Today").font(.caption).foregroundStyle(.secondary)
                     Text("\(ClaudeUsageScanner.formatTokens(today.inputTokens + today.cacheCreationTokens))↑ \(ClaudeUsageScanner.formatTokens(today.outputTokens))↓")
@@ -2551,6 +2557,7 @@ private struct UsageBreakdownCard: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
     }
