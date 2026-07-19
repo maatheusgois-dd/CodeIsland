@@ -2530,7 +2530,7 @@ private struct CursorSetupCard: View {
                     let ok = scanner.refreshCSV()
                     DispatchQueue.main.async {
                         isRefreshing = false
-                        refreshResult = ok ? "CSV fetched from Chrome" : "Failed — is Chrome logged into cursor.com?"
+                        refreshResult = ok ? "✓ CSV fetched from Chrome" : "Failed — allow Keychain access for Chrome Safe Storage, or use manual cookie extraction below"
                         if ok { hasCSV = true; appState?.scanClaudeUsage() }
                     }
                 }

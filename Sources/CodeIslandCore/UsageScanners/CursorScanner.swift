@@ -71,20 +71,30 @@ public struct CursorScanner: UsageScanner {
     /// Returns true on success.
     public func refreshCSV() -> Bool {
         var sessionToken: String?
+        var failReason = "unknown"
+
+        // Try Chrome cookie extraction first
         if let chromeToken = readChromeCursorSessionToken() {
             usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
             sessionToken = chromeToken
+        } else {
+            failReason = "chrome-cookie-extraction-failed"
+            usageLogger.notice("Cursor: Chrome cookie extraction failed — may need Keychain permission")
         }
+
+        // Fallback: IDE session token (may not work for CSV API — different auth)
         if sessionToken == nil, let ideToken = readCursorSessionToken(dbPath: stateDBPath) {
-            usageLogger.notice("Cursor: using IDE session token (len=\(ideToken.count))")
+            usageLogger.notice("Cursor: trying IDE session token (len=\(ideToken.count))")
             sessionToken = ideToken
+            failReason = "ide-token"
         }
+
         guard let token = sessionToken else {
-            usageLogger.notice("Cursor: no session token found for refresh")
+            usageLogger.error("Cursor: no session token found — \(failReason)")
             return false
         }
         guard let csv = fetchCursorUsageCSV(token: token), !csv.hasPrefix("<") else {
-            usageLogger.notice("Cursor: CSV fetch failed during refresh")
+            usageLogger.error("Cursor: CSV fetch failed — token may be wrong type or expired")
             return false
         }
         try? csv.write(toFile: csvCachePath, atomically: true, encoding: .utf8)
