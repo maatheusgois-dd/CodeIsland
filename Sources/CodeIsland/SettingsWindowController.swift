@@ -16,7 +16,7 @@ class SettingsWindowController {
         }
     }
 
-    func show() {
+    func show(page: SettingsPage? = nil) {
         // Switch to regular activation policy so the window can receive focus
         NSApp.setActivationPolicy(.regular)
         // Use the actual bundle app icon so Dock matches the packaged asset catalog icon.
@@ -28,7 +28,7 @@ class SettingsWindowController {
             return
         }
 
-        let settingsView = SettingsView(appState: appState)
+        let settingsView = SettingsView(appState: appState, initialPage: page)
         let hostingView = NSHostingView(rootView: settingsView)
 
         let screen = NSScreen.main ?? NSScreen.screens.first

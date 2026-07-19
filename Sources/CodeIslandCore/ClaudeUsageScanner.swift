@@ -325,13 +325,11 @@ public enum ClaudeUsageScanner {
 
 
     /// Parse one Codex transcript line. Codex emits `type: "event_msg"` with
-    /// `payload.type: "token_count"` containing `total_token_usage`. Each
-    /// `total_token_usage` is cumulative for the session, so we only record
-    /// the LAST one per session file — but the incremental cache dedupes by
-    /// the `id` field on the message, and token_count events have no `id`,
-    /// so we synthesize one from the timestamp.
+    /// `payload.type: "token_count"` containing both `total_token_usage`
+    /// (cumulative for the session) and `last_token_usage` (delta for this
+    /// response). We use `last_token_usage` to avoid double-counting.
     static func parseCodexUsage(_ line: String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)? {
-        guard line.contains("\"token_count\""), line.contains("\"total_token_usage\"") else { return nil }
+        guard line.contains("\"token_count\""), line.contains("\"token_usage\"") else { return nil }
         guard let data = line.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               obj["type"] as? String == "event_msg",
@@ -340,7 +338,7 @@ public enum ClaudeUsageScanner {
               let payload = obj["payload"] as? [String: Any],
               payload["type"] as? String == "token_count",
               let info = payload["info"] as? [String: Any],
-              let usage = info["total_token_usage"] as? [String: Any]
+              let usage = info["last_token_usage"] as? [String: Any]
         else { return nil }
 
         var totals = ClaudeUsageTotals()

@@ -69,7 +69,15 @@ struct SettingsView: View {
     @ObservedObject private var l10n = L10n.shared
     @State private var selectedPage: SettingsPage = .general
     var appState: AppState?
+    var initialPage: SettingsPage? = nil
 
+    init(appState: AppState?, initialPage: SettingsPage? = nil) {
+        self.appState = appState
+        self.initialPage = initialPage
+        if let page = initialPage {
+            _selectedPage = State(initialValue: page)
+        }
+    }
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedPage) {

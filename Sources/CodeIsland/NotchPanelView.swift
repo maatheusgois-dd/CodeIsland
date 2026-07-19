@@ -1913,6 +1913,10 @@ private struct UsageFooterLine: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
         .help(detail)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            SettingsWindowController.shared.show(page: .usage)
+        }
     }
 
     private func compact(_ t: ClaudeUsageTotals) -> String {
