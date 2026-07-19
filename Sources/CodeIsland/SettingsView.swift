@@ -2487,6 +2487,10 @@ private struct CursorSetupCard: View {
     @State private var hasCSV = false
     @State private var showFileImporter = false
     @State private var showConfirmDelete = false
+    @State private var saveCookieForReuse = false
+    @State private var autoRefreshEnabled = false
+    @State private var autoRefreshHours = 1
+    @State private var hasSavedCookie = false
     weak var appState: AppState?
 
     private let scanner = CursorScanner()
@@ -2665,19 +2669,27 @@ private struct CursorSetupCard: View {
                             .buttonStyle(.bordered)
                         }
                     }
+                    Toggle("Save cookie for auto-refresh (no Keychain prompt)", isOn: $saveCookieForReuse)
+                        .font(.caption)
+                        .toggleStyle(.checkbox)
                     Button {
                         isFetchingCookie = true
                         let cookie = manualCookie
+                        let shouldSave = saveCookieForReuse
                         DispatchQueue.global(qos: .userInitiated).async {
                             let ok = scanner.refreshCSVWithCookie(cookie)
+                            if ok && shouldSave { scanner.saveCookie(cookie) }
                             DispatchQueue.main.async {
                                 isFetchingCookie = false
                                 if ok {
                                     refreshResult = "✓ CSV fetched via cookie"
                                     hasCSV = true
+                                    if shouldSave { hasSavedCookie = true }
                                     withAnimation { showManualCookie = false }
                                     manualCookie = ""
                                     appState?.scanClaudeUsage()
+                                } else {
+                                    refreshResult = "Failed — invalid or expired cookie"
                                 }
                             }
                         }
@@ -2697,6 +2709,66 @@ private struct CursorSetupCard: View {
                 Text(result)
                     .font(.caption)
                     .foregroundStyle(result.contains("Failed") || result.contains("Invalid") ? .red : .green)
+            }
+
+            // Auto-refresh with saved cookie
+            if hasSavedCookie {
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Auto-refresh from saved cookie", isOn: $autoRefreshEnabled)
+                        .font(.subheadline.weight(.medium))
+                    if autoRefreshEnabled {
+                        Picker("Refresh every", selection: $autoRefreshHours) {
+                            Text("1 hour").tag(1)
+                            Text("3 hours").tag(3)
+                            Text("6 hours").tag(6)
+                            Text("12 hours").tag(12)
+                            Text("24 hours").tag(24)
+                        }
+                        .pickerStyle(.segmented)
+                        .font(.caption)
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            isRefreshing = true
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let ok = scanner.refreshFromSavedCookie()
+                                DispatchQueue.main.async {
+                                    isRefreshing = false
+                                    if ok {
+                                        refreshResult = "✓ CSV refreshed from saved cookie"
+                                        hasCSV = true
+                                        appState?.scanClaudeUsage()
+                                    } else {
+                                        refreshResult = "Failed — cookie may be expired"
+                                        autoRefreshEnabled = false
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                if isRefreshing { ProgressView().scaleEffect(0.7) }
+                                Image(systemName: "arrow.clockwise")
+                                Text("Refresh now")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isRefreshing)
+
+                        Button(role: .destructive) {
+                            scanner.clearSavedCookie()
+                            hasSavedCookie = false
+                            autoRefreshEnabled = false
+                            refreshResult = "Saved cookie removed"
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "trash")
+                                Text("Clear saved cookie")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
             }
 
             // Destructive: remove cached CSV — at the end, only when cached
@@ -2729,7 +2801,25 @@ private struct CursorSetupCard: View {
         .padding()
         .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { hasCSV = scanner.hasCachedCSV }
+        .onAppear { hasCSV = scanner.hasCachedCSV; hasSavedCookie = scanner.hasSavedCookie }
+        .task(id: "\(autoRefreshEnabled)-\(autoRefreshHours)") {
+            guard autoRefreshEnabled, hasSavedCookie else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(TimeInterval(autoRefreshHours * 3600)))
+                guard !Task.isCancelled else { break }
+                let ok = await Task.detached { scanner.refreshFromSavedCookie() }.value
+                await MainActor.run {
+                    if ok {
+                        refreshResult = "✓ Auto-refreshed from saved cookie"
+                        hasCSV = true
+                        appState?.scanClaudeUsage()
+                    } else {
+                        refreshResult = "Auto-refresh failed — cookie may be expired"
+                        autoRefreshEnabled = false
+                    }
+                }
+            }
+        }
     }
 
 }

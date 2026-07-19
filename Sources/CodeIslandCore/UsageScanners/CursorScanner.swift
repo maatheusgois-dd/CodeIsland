@@ -12,12 +12,14 @@ public struct CursorScanner: UsageScanner {
     public let sourceName = "Cursor"
     private let stateDBPath: String
     public let csvCachePath: String
+    public let cookieCachePath: String
     private let tokscaleCachePath: String
     private let chromeCookiesPath: String
 
     public init(cursorStorage: String = NSHomeDirectory() + "/Library/Application Support/Cursor/User/globalStorage") {
         self.stateDBPath = cursorStorage + "/state.vscdb"
         self.csvCachePath = NSHomeDirectory() + "/.codeisland/cursor-usage.csv"
+        self.cookieCachePath = NSHomeDirectory() + "/.codeisland/cursor-cookie.txt"
         self.tokscaleCachePath = NSHomeDirectory() + "/.config/tokscale/cursor-cache/usage.csv"
         self.chromeCookiesPath = NSHomeDirectory() + "/Library/Application Support/Google/Chrome/Default/Cookies"
     }
@@ -97,6 +99,41 @@ public struct CursorScanner: UsageScanner {
         try? csv.write(toFile: csvCachePath, atomically: true, encoding: .utf8)
         usageLogger.notice("Cursor: CSV fetched with manual cookie (\(csv.count) bytes)")
         return true
+    }
+
+    /// Save a cookie value for reuse (avoids Keychain prompt on each refresh).
+    public func saveCookie(_ cookie: String) {
+        let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        try? trimmed.write(toFile: cookieCachePath, atomically: true, encoding: .utf8)
+        // Restrict permissions to owner-only
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cookieCachePath)
+        usageLogger.notice("Cursor: cookie saved for reuse")
+    }
+
+    /// Load the saved cookie, if any.
+    public var savedCookie: String? {
+        guard let cookie = try? String(contentsOfFile: cookieCachePath, encoding: .utf8) else { return nil }
+        let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Check if a saved cookie exists.
+    public var hasSavedCookie: Bool {
+        savedCookie != nil
+    }
+
+    /// Delete the saved cookie.
+    public func clearSavedCookie() {
+        try? FileManager.default.removeItem(atPath: cookieCachePath)
+        usageLogger.notice("Cursor: saved cookie cleared")
+    }
+
+    /// Refresh CSV using the saved cookie (no Keychain prompt).
+    public func refreshFromSavedCookie() -> Bool {
+        guard let cookie = savedCookie else { return false }
+        usageLogger.notice("Cursor: refreshing from saved cookie")
+        return refreshCSVWithCookie(cookie)
     }
 
     /// Save a manually-provided CSV string (e.g. pasted from the browser console).
