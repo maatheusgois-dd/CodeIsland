@@ -2523,7 +2523,7 @@ private struct CursorSetupCard: View {
                         if hasSavedCookie {
                             Image(systemName: "key.fill")
                                 .font(.caption)
-                                .foregroundStyle(.purple)
+                                .foregroundStyle(.green)
                         } else {
                             Text("No cookie")
                                 .font(.caption)
@@ -2546,7 +2546,9 @@ private struct CursorSetupCard: View {
                 let token = scanner.extractChromeToken()
                 guard let sessionToken = token else {
                     isRefreshing = false
-                    refreshResult = "Failed — couldn't extract Chrome cookie. Click 'Always Allow' on the Keychain dialog, or use manual cookie extraction below."
+                    refreshResult = hasSavedCookie
+                        ? "Chrome extraction unavailable (unsigned app). Using saved cookie instead — click 'Refresh now' below."
+                        : "Chrome extraction needs Keychain access (unsigned app limitation). Use 'Manual cookie extraction' below instead."
                     return
                 }
                 DispatchQueue.global(qos: .userInitiated).async {
