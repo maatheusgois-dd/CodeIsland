@@ -2700,6 +2700,7 @@ private struct CursorSetupCard: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(isFetchingCookie || manualCookie.isEmpty)
                     }
+                    .padding(.leading, 12)
                     .padding(.top, 4)
                 }
             }
@@ -2758,6 +2759,7 @@ private struct CursorSetupCard: View {
                         }
                         .buttonStyle(.borderedProminent)
                     }
+                    .padding(.leading, 12)
                     .padding(.top, 4)
                     .fileImporter(isPresented: $showFileImporter,
                                    allowedContentTypes: [.commaSeparatedText, .text]) { result in

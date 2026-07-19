@@ -148,5 +148,7 @@ public func formatTokens(_ count: Int) -> String {
     if abs < 1000 { return "\(count)" }
     let k = Double(abs) / 1000
     if k < 1000 { return String(format: "%.1fK", k) }
-    return String(format: "%.1fM", k / 1000)
+    let m = k / 1000
+    if m < 1000 { return String(format: "%.1fM", m) }
+    return String(format: "%.1fB", m / 1000)
 }
