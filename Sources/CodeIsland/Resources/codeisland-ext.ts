@@ -60,7 +60,9 @@ const ENV_KEYS = [
 // ── Dangerous bash patterns (mirrors permission-gate.ts) ──────────────────────
 
 const DANGEROUS_PATTERNS: RegExp[] = [
-  /\brm\s+(-rf?|--recursive)/i,
+  // Only flag rm -rf of truly dangerous targets: root, home, or bare paths.
+  // `rm -rf .swiftpm` / `rm -rf .build` / `rm -f file` are safe and common.
+  /\brm\s+(-[a-z]*r[a-z]*f|--recursive)\s+[/~]|\brm\s+(-[a-z]*r[a-z]*f|--recursive)\s+\$HOME\b/i,
   /\bsudo\b/i,
   /\b(chmod|chown)\b.*777/i,
 ];
@@ -486,7 +488,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
 
       let response: Record<string, unknown> | null = null;
       try {
-        response = await sendAndWaitResponse(payload);
+        response = await sendAndWaitResponse(payload, 20_000);
       } finally {
         pendingPermissionSessions.delete(sid);
       }
