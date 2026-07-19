@@ -2408,6 +2408,11 @@ private struct UsagePage: View {
                     // 14-day summary
                     UsageSummaryCard(dailyTotals: usage.dailyTotals)
 
+                    // Per-AI breakdown
+                    if !usage.perSource.isEmpty {
+                        UsagePerSourceCard(sources: usage.perSource)
+                    }
+
                     // 14-day bar chart
                     UsageHistoryCard(dailyTotals: usage.dailyTotals, scannedAt: usage.scannedAt)
 
@@ -2465,6 +2470,95 @@ private struct UsageSummaryCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+    }
+}
+
+private struct UsagePerSourceCard: View {
+    let sources: [ClaudeUsageScanner.SourceTotals]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Per-AI Breakdown (14 Days)")
+                .font(.headline)
+
+            ForEach(sources, id: \.name) { source in
+                let totalTokens = source.total.inputTokens + source.total.outputTokens
+                    + source.total.cacheCreationTokens + source.total.cacheReadTokens
+                let allTotal = sources.reduce(0) { $0 + $1.total.inputTokens + $1.total.outputTokens
+                    + $1.total.cacheCreationTokens + $1.total.cacheReadTokens }
+                let pct = allTotal > 0 ? Double(totalTokens) / Double(allTotal) * 100 : 0
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(source.name)
+                            .font(.system(.body, design: .default).bold())
+                        Spacer()
+                        Text("\(ClaudeUsageScanner.formatTokens(totalTokens)) · \(String(format: "%.0f%%", pct))")
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    // Progress bar
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.teal.opacity(0.3))
+                            .overlay(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Color.teal.opacity(0.7))
+                                    .frame(width: geo.size.width * CGFloat(pct / 100))
+                            }
+                    }
+                    .frame(height: 6)
+
+                    // Mini stats
+                    HStack(spacing: 16) {
+                        Text("In: \(ClaudeUsageScanner.formatTokens(source.total.inputTokens + source.total.cacheCreationTokens))")
+                        Text("Out: \(ClaudeUsageScanner.formatTokens(source.total.outputTokens))")
+                        Text("Cache: \(ClaudeUsageScanner.formatTokens(source.total.cacheReadTokens))")
+                        Text("Msgs: \(source.total.messageCount)")
+                    }
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+
+            // Mini bar chart per source
+            if sources.count > 1 {
+                Divider().padding(.vertical, 4)
+                ForEach(sources, id: \.name) { source in
+                    HStack(spacing: 8) {
+                        Text(source.name)
+                            .font(.caption)
+                            .frame(width: 70, alignment: .leading)
+                        UsageSourceBars(dailyTotals: source.dailyTotals)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+    }
+}
+
+private struct UsageSourceBars: View {
+    let dailyTotals: [ClaudeUsageTotals]
+
+    var body: some View {
+        let peak = max(dailyTotals.map { $0.inputTokens + $0.outputTokens }.max() ?? 0, 1)
+        GeometryReader { geo in
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(Array(dailyTotals.enumerated()), id: \.offset) { _, total in
+                    let value = total.inputTokens + total.outputTokens
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.teal.opacity(0.5))
+                        .frame(height: max(2, CGFloat(value) / CGFloat(peak) * geo.size.height))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .frame(height: 24)
     }
 }
 

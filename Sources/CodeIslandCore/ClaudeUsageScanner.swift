@@ -37,6 +37,17 @@ public enum ClaudeUsageScanner {
     /// History resolution: one bucket per day, oldest first.
     public static let historyDays = 14
 
+    public struct SourceTotals: Equatable, Sendable {
+        public let name: String
+        public let total: ClaudeUsageTotals
+        public let dailyTotals: [ClaudeUsageTotals]
+        public init(name: String, total: ClaudeUsageTotals, dailyTotals: [ClaudeUsageTotals]) {
+            self.name = name
+            self.total = total
+            self.dailyTotals = dailyTotals
+        }
+    }
+
     public struct Snapshot: Equatable, Sendable {
         public let last5h: ClaudeUsageTotals
         public let today: ClaudeUsageTotals
@@ -47,6 +58,8 @@ public enum ClaudeUsageScanner {
         /// is 13 days ago (midnight-to-midnight), `dailyTotals[last]` is
         /// today. Merges Claude Code and OMP usage.
         public let dailyTotals: [ClaudeUsageTotals]
+        /// Per-source breakdown (Claude Code, OMP) for the 14-day window.
+        public let perSource: [SourceTotals]
         public let scannedAt: Date
 
         public init(
@@ -54,12 +67,14 @@ public enum ClaudeUsageScanner {
             today: ClaudeUsageTotals,
             hourlyOutputTokens: [Int],
             dailyTotals: [ClaudeUsageTotals] = [],
+            perSource: [SourceTotals] = [],
             scannedAt: Date
         ) {
             self.last5h = last5h
             self.today = today
             self.hourlyOutputTokens = hourlyOutputTokens
             self.dailyTotals = dailyTotals
+            self.perSource = perSource
             self.scannedAt = scannedAt
         }
     }
@@ -76,9 +91,8 @@ public enum ClaudeUsageScanner {
         struct FileEntry: Sendable {
             var consumedBytes: UInt64 = 0
             var entries: [CachedMessage] = []
-            // Dedupe is per file: an assistant message's continuation lines
-            // repeat its id within the same transcript; ids never straddle files.
             var seenIds: Set<String> = []
+            var source: String = ""
         }
         var files: [String: FileEntry] = [:]
         public init() {}
@@ -117,17 +131,21 @@ public enum ClaudeUsageScanner {
         let fm = FileManager.default
         // Claude: ~/.claude/projects/<project>/<file>.jsonl
         // OMP:    ~/.omp/agent/sessions/<project>/<file>.jsonl
-        let sources: [(root: String, parser: (String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)?)] = [
-            (claudeHome + "/projects", parseAssistantUsage),
-            (ompHome + "/agent/sessions", parseOMPUsage),
+        let sources: [(root: String, name: String, parser: (String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)?)] = [
+            (claudeHome + "/projects", "Claude Code", parseAssistantUsage),
+            (ompHome + "/agent/sessions", "OMP", parseOMPUsage),
         ]
         for source in sources {
             enumerateProjects(
-                root: source.root, parser: source.parser, fm: fm,
+                root: source.root, sourceName: source.name, parser: source.parser, fm: fm,
                 cutoff: cutoff, cache: &cache, activeFiles: &activeFiles)
         }
 
-        func tally(_ message: FileCache.CachedMessage) {
+        // Per-source accumulators.
+        var perSourceTotals: [String: ClaudeUsageTotals] = [:]
+        var perSourceDaily: [String: [ClaudeUsageTotals]] = [:]
+
+        func tally(_ message: FileCache.CachedMessage, _ sourceName: String) {
             guard message.timestamp <= now else { return }
             if message.timestamp >= fiveHoursAgo { last5h.add(message.usage) }
             if message.timestamp >= midnight { today.add(message.usage) }
@@ -140,25 +158,42 @@ public enum ClaudeUsageScanner {
             if daysAgo >= 0 && daysAgo < historyDays {
                 daily[historyDays - 1 - daysAgo].add(message.usage)
             }
+            // Per-source tracking.
+            perSourceTotals[sourceName, default: ClaudeUsageTotals()].add(message.usage)
+            if daysAgo >= 0 && daysAgo < historyDays {
+                var sd = perSourceDaily[sourceName] ?? [ClaudeUsageTotals](repeating: ClaudeUsageTotals(), count: historyDays)
+                sd[historyDays - 1 - daysAgo].add(message.usage)
+                perSourceDaily[sourceName] = sd
+            }
         }
 
         // Files that fell out of the mtime window carry no in-window entries.
         cache.files = cache.files.filter { activeFiles.contains($0.key) }
-        for entry in cache.files.values {
+        for (path, entry) in cache.files {
+            let src = entry.source.isEmpty ? "Unknown" : entry.source
             for message in entry.entries where message.timestamp >= cutoff {
-                tally(message)
+                tally(message, src)
             }
         }
+
+        let perSource = sources.map { s in
+            SourceTotals(
+                name: s.name,
+                total: perSourceTotals[s.name] ?? ClaudeUsageTotals(),
+                dailyTotals: perSourceDaily[s.name] ?? [ClaudeUsageTotals](repeating: ClaudeUsageTotals(), count: historyDays)
+            )
+        }.filter { !$0.total.isEmpty }
+
         return Snapshot(
             last5h: last5h, today: today,
-            hourlyOutputTokens: hourly, dailyTotals: daily, scannedAt: now)
+            hourlyOutputTokens: hourly, dailyTotals: daily,
+            perSource: perSource, scannedAt: now)
     }
 
-    /// Walk one source tree, incrementally parse new bytes past each file's
     /// cached offset, prune entries older than `cutoff`, and record active
-    /// paths so dropped files can be evicted from the cache afterwards.
     private static func enumerateProjects(
         root: String,
+        sourceName: String,
         parser: (String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)?,
         fm: FileManager,
         cutoff: Date,
@@ -179,9 +214,11 @@ public enum ClaudeUsageScanner {
                 let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
 
                 var entry = cache.files[path] ?? FileCache.FileEntry()
+                entry.source = sourceName
                 if size < entry.consumedBytes {
                     // Truncated or replaced — start over.
                     entry = FileCache.FileEntry()
+                    entry.source = sourceName
                 }
                 if size > entry.consumedBytes {
                     consumeNewLines(path: path, parser: parser, into: &entry)
