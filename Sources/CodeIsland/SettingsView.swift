@@ -2593,29 +2593,6 @@ private struct CursorSetupCard: View {
             VStack(spacing: 4) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
-                        showManualCSV.toggle()
-                        if showManualCSV { showManualCookie = false }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.teal)
-                        Text("Manual CSV extraction")
-                            .font(.subheadline.weight(.medium))
-                        Spacer()
-                        Image(systemName: showManualCSV ? "chevron.up" : "chevron.down")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(.background.tertiary))
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
                         showManualCookie.toggle()
                         if showManualCookie { showManualCSV = false }
                     }
@@ -2636,53 +2613,29 @@ private struct CursorSetupCard: View {
                     .background(RoundedRectangle(cornerRadius: 8).fill(.background.tertiary))
                 }
                 .buttonStyle(.plain)
-            }
 
-            if showManualCSV {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("1. Download the CSV:")
-                        .font(.caption)
-                    Link(destination: URL(string: "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens")!) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.down.circle")
-                            Text("Download usage CSV")
-                        }
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.teal)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showManualCSV.toggle()
+                        if showManualCSV { showManualCookie = false }
                     }
-                    Text("2. Import the downloaded file:")
-                        .font(.caption)
-                    Button {
-                        showFileImporter = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "square.and.arrow.down")
-                            Text("Import CSV file")
-                        }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.teal)
+                        Text("Manual CSV extraction")
+                            .font(.subheadline.weight(.medium))
+                        Spacer()
+                        Image(systemName: showManualCSV ? "chevron.up" : "chevron.down")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.background.tertiary))
                 }
-                .padding(.top, 4)
-                .fileImporter(isPresented: $showFileImporter,
-                               allowedContentTypes: [.commaSeparatedText, .text]) { result in
-                    switch result {
-                    case .success(let url):
-                        if url.startAccessingSecurityScopedResource() {
-                            defer { url.stopAccessingSecurityScopedResource() }
-                            if let csv = try? String(contentsOf: url, encoding: .utf8),
-                               scanner.saveManualCSV(csv) {
-                                refreshResult = "✓ CSV imported successfully"
-                                withAnimation { showManualCSV = false }
-                                hasCSV = true
-                                appState?.scanClaudeUsage()
-                            } else {
-                                refreshResult = "Invalid CSV — must contain a Date header"
-                            }
-                        }
-                    case .failure:
-                        refreshResult = "Failed to read file"
-                    }
-                }
+                .buttonStyle(.plain)
             }
 
             if showManualCookie {
@@ -2770,6 +2723,53 @@ private struct CursorSetupCard: View {
                 .padding(.top, 4)
             }
 
+            if showManualCSV {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("1. Download the CSV:")
+                        .font(.caption)
+                    Link(destination: URL(string: "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens")!) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle")
+                            Text("Download usage CSV")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.teal)
+                    }
+                    Text("2. Import the downloaded file:")
+                        .font(.caption)
+                    Button {
+                        showFileImporter = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "square.and.arrow.down")
+                            Text("Import CSV file")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(.top, 4)
+                .fileImporter(isPresented: $showFileImporter,
+                               allowedContentTypes: [.commaSeparatedText, .text]) { result in
+                    switch result {
+                    case .success(let url):
+                        if url.startAccessingSecurityScopedResource() {
+                            defer { url.stopAccessingSecurityScopedResource() }
+                            if let csv = try? String(contentsOf: url, encoding: .utf8),
+                               scanner.saveManualCSV(csv) {
+                                refreshResult = "✓ CSV imported successfully"
+                                withAnimation { showManualCSV = false }
+                                hasCSV = true
+                                appState?.scanClaudeUsage()
+                            } else {
+                                refreshResult = "Invalid CSV — must contain a Date header"
+                            }
+                        }
+                    case .failure:
+                        refreshResult = "Failed to read file"
+                    }
+                }
+            }
+
             if let result = refreshResult {
                 Text(result)
                     .font(.caption)
@@ -2822,11 +2822,17 @@ private struct CursorSetupCard: View {
                                 }
                             }
                         } label: {
-                            HStack(spacing: 4) {
-                                if isRefreshing { ProgressView().scaleEffect(0.7) }
-                                Image(systemName: "arrow.clockwise")
-                                Text("Refresh now")
+                            HStack(spacing: 6) {
+                                if isRefreshing {
+                                    ProgressView()
+                                        .scaleEffect(0.6)
+                                        .frame(width: 14, height: 14)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                                Text(isRefreshing ? "Refreshing…" : "Refresh now")
                             }
+                            .frame(height: 20)
                         }
                         .buttonStyle(.bordered)
                         .disabled(isRefreshing)
@@ -2837,10 +2843,11 @@ private struct CursorSetupCard: View {
                             autoRefreshEnabled = false
                             refreshResult = "Saved cookie removed"
                         } label: {
-                            HStack(spacing: 4) {
+                            HStack(spacing: 6) {
                                 Image(systemName: "xmark.circle")
                                 Text("Clear cookie")
                             }
+                            .frame(height: 20)
                         }
                         .buttonStyle(.bordered)
                     }
