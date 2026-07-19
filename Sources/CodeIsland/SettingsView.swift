@@ -2507,14 +2507,28 @@ private struct CursorSetupCard: View {
                     Text("Cursor Usage Setup")
                         .font(.headline)
                     Spacer()
-                    if hasCSV {
-                        Text("CSV Cached")
+                    HStack(spacing: 6) {
+                        if hasCSV {
+                            Text("CSV")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                        } else {
+                            Text("No CSV")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("·")
                             .font(.caption)
-                            .foregroundStyle(.green)
-                    } else {
-                        Text("No CSV")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.2))
+                        if hasSavedCookie {
+                            Image(systemName: "key.fill")
+                                .font(.caption)
+                                .foregroundStyle(.purple)
+                        } else {
+                            Text("No cookie")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
@@ -2739,19 +2753,30 @@ private struct CursorSetupCard: View {
             // Auto-refresh with saved cookie
             if hasSavedCookie {
                 Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Auto-refresh from saved cookie", isOn: $autoRefreshEnabled)
-                        .font(.subheadline.weight(.medium))
-                    if autoRefreshEnabled {
-                        Picker("Refresh every", selection: $autoRefreshHours) {
-                            Text("1 hour").tag(1)
-                            Text("3 hours").tag(3)
-                            Text("6 hours").tag(6)
-                            Text("12 hours").tag(12)
-                            Text("24 hours").tag(24)
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle(isOn: $autoRefreshEnabled) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.clockwise.circle")
+                                .foregroundStyle(.teal)
+                            Text("Auto-refresh from saved cookie")
+                                .font(.subheadline.weight(.medium))
                         }
-                        .pickerStyle(.segmented)
-                        .font(.caption)
+                    }
+                    if autoRefreshEnabled {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Refresh every")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Picker("Refresh every", selection: $autoRefreshHours) {
+                                Text("1h").tag(1)
+                                Text("3h").tag(3)
+                                Text("6h").tag(6)
+                                Text("12h").tag(12)
+                                Text("24h").tag(24)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
                     }
                     HStack(spacing: 8) {
                         Button {
@@ -2787,8 +2812,8 @@ private struct CursorSetupCard: View {
                             refreshResult = "Saved cookie removed"
                         } label: {
                             HStack(spacing: 4) {
-                                Image(systemName: "trash")
-                                Text("Clear saved cookie")
+                                Image(systemName: "xmark.circle")
+                                Text("Clear cookie")
                             }
                         }
                         .buttonStyle(.bordered)
