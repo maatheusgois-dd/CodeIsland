@@ -2464,6 +2464,7 @@ private struct UsagePage: View {
 private struct CursorSetupCard: View {
     @State private var isRefreshing = false
     @State private var refreshResult: String?
+    @State private var showConsoleScript = false
     @State private var showManualEntry = false
     @State private var manualCSV = ""
     weak var appState: AppState?
@@ -2522,7 +2523,7 @@ private struct CursorSetupCard: View {
 
                 // Open cursor.com button
                 Button {
-                    if let url = URL(string: "https://cursor.com/settings") {
+                    if let url = URL(string: "https://cursor.com/dashboard/usage") {
                         NSWorkspace.shared.open(url)
                     }
                 } label: {
@@ -2544,10 +2545,10 @@ private struct CursorSetupCard: View {
             }
             .buttonStyle(.bordered)
 
-            // JS console snippet
-            DisclosureGroup("Browser console script") {
+            // JS console snippet — entire row is a button
+            DisclosureGroup(isExpanded: $showConsoleScript) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("1. Open cursor.com/settings and log in")
+                    Text("1. Open cursor.com/dashboard/usage and log in")
                     Text("2. Open browser DevTools (⌥⌘J)")
                     Text("3. Paste this in the console:")
                         .font(.caption.monospaced())
@@ -2563,7 +2564,19 @@ private struct CursorSetupCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.top, 4)
+                .padding(.top, 8)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: showConsoleScript ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Browser console script")
+                        .font(.subheadline)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+                .padding(.vertical, 8)
+                .padding(.horizontal, 4)
             }
 
             if showManualEntry {
@@ -2818,14 +2831,20 @@ private struct UsageSparklineLarge: View {
 
     var body: some View {
         let peak = max(buckets.max() ?? 0, 1)
-        HStack(alignment: .bottom, spacing: 4) {
-            ForEach(Array(buckets.enumerated()), id: \.offset) { _, value in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(value == 0 ? Color.gray.opacity(0.2) : Color.teal.opacity(0.6))
-                    .frame(width: 12, height: max(2, CGFloat(value) / CGFloat(peak) * 60))
+        GeometryReader { geo in
+            let n = max(buckets.count, 1)
+            let spacing: CGFloat = 3
+            let barWidth = max(4, (geo.size.width - CGFloat(n - 1) * spacing) / CGFloat(n))
+            HStack(alignment: .bottom, spacing: spacing) {
+                ForEach(Array(buckets.enumerated()), id: \.offset) { _, value in
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(value == 0 ? Color.gray.opacity(0.2) : Color.teal.opacity(0.7))
+                        .frame(width: barWidth, height: max(3, CGFloat(value) / CGFloat(peak) * geo.size.height))
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         }
-        .frame(height: 60, alignment: .bottom)
+        .frame(height: 120)
     }
 }
 
