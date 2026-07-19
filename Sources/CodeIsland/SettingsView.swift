@@ -2700,9 +2700,10 @@ private struct CursorSetupCard: View {
                         isFetchingCookie = true
                         let cookie = manualCookie
                         let shouldSave = saveCookieForReuse
+                        // Save cookie to Keychain on main thread (before background fetch)
+                        if shouldSave { scanner.saveCookie(cookie) }
                         DispatchQueue.global(qos: .userInitiated).async {
                             let ok = scanner.refreshCSVWithCookie(cookie)
-                            if ok && shouldSave { scanner.saveCookie(cookie) }
                             DispatchQueue.main.async {
                                 isFetchingCookie = false
                                 if ok {
