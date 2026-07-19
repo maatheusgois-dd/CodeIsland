@@ -412,6 +412,7 @@ public struct CursorScanner: UsageScanner {
     }
 
     /// Read the Chrome Safe Storage password from the macOS Keychain.
+    /// Must run on the main thread to trigger the Keychain permission dialog.
     private func readChromeSafeStorageKey() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -421,10 +422,28 @@ public struct CursorScanner: UsageScanner {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let key = String(data: data, encoding: .utf8) else { return nil }
+        var key: String?
+
+        if Thread.isMainThread {
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecSuccess,
+               let data = result as? Data,
+               let k = String(data: data, encoding: .utf8) { key = k }
+            else if status != errSecSuccess {
+                usageLogger.error("Cursor: Keychain access failed (status=\(status))")
+            }
+        } else {
+            // Keychain UI prompts require the main thread — sync dispatch
+            DispatchQueue.main.sync {
+                let status = SecItemCopyMatching(query as CFDictionary, &result)
+                if status == errSecSuccess,
+                   let data = result as? Data,
+                   let k = String(data: data, encoding: .utf8) { key = k }
+                else if status != errSecSuccess {
+                    usageLogger.error("Cursor: Keychain access failed (status=\(status))")
+                }
+            }
+        }
         return key
     }
 
