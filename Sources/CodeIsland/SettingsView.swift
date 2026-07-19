@@ -2526,11 +2526,20 @@ private struct CursorSetupCard: View {
             Button {
                 isRefreshing = true
                 refreshResult = nil
+                // Chrome cookie extraction needs the main thread for the
+                // macOS Keychain permission dialog. Do extraction on main,
+                // then the network fetch on a background queue.
+                let token = scanner.extractChromeToken()
+                guard let sessionToken = token else {
+                    isRefreshing = false
+                    refreshResult = "Failed — couldn't extract Chrome cookie. Click 'Always Allow' on the Keychain dialog, or use manual cookie extraction below."
+                    return
+                }
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let ok = scanner.refreshCSV()
+                    let ok = scanner.fetchAndCacheCSV(token: sessionToken)
                     DispatchQueue.main.async {
                         isRefreshing = false
-                        refreshResult = ok ? "✓ CSV fetched from Chrome" : "Failed — allow Keychain access for Chrome Safe Storage, or use manual cookie extraction below"
+                        refreshResult = ok ? "✓ CSV fetched from Chrome" : "Failed — CSV fetch failed. Cookie may be expired."
                         if ok { hasCSV = true; appState?.scanClaudeUsage() }
                     }
                 }

@@ -102,6 +102,29 @@ public struct CursorScanner: UsageScanner {
         return true
     }
 
+    /// Extract the WorkosCursorSessionToken from Chrome. Call this on the
+ /// main thread — the Keychain access for Chrome Safe Storage may prompt
+ /// the user for permission, which requires the main thread.
+ public func extractChromeToken() -> String? {
+     if let chromeToken = readChromeCursorSessionToken() {
+         usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
+         return chromeToken
+     }
+     usageLogger.notice("Cursor: Chrome cookie extraction failed — Keychain access may have been denied")
+     return nil
+ }
+
+ /// Fetch the CSV from the Cursor API and cache it. Can run on any thread.
+ public func fetchAndCacheCSV(token: String) -> Bool {
+     guard let csv = fetchCursorUsageCSV(token: token), !csv.hasPrefix("<") else {
+         usageLogger.error("Cursor: CSV fetch failed — token may be wrong type or expired")
+         return false
+     }
+     try? csv.write(toFile: csvCachePath, atomically: true, encoding: .utf8)
+     usageLogger.notice("Cursor: CSV refreshed and cached (\(csv.count) bytes)")
+     return true
+ }
+
     /// Fetch CSV using a manually-provided session token (cookie value).
     public func refreshCSVWithCookie(_ cookie: String) -> Bool {
         let token = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -412,7 +435,7 @@ public struct CursorScanner: UsageScanner {
     }
 
     /// Read the Chrome Safe Storage password from the macOS Keychain.
-    /// Must run on the main thread to trigger the Keychain permission dialog.
+    /// Caller must be on the main thread for the Keychain permission dialog.
     private func readChromeSafeStorageKey() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -422,27 +445,12 @@ public struct CursorScanner: UsageScanner {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: AnyObject?
-        var key: String?
-
-        if Thread.isMainThread {
-            let status = SecItemCopyMatching(query as CFDictionary, &result)
-            if status == errSecSuccess,
-               let data = result as? Data,
-               let k = String(data: data, encoding: .utf8) { key = k }
-            else if status != errSecSuccess {
-                usageLogger.error("Cursor: Keychain access failed (status=\(status))")
-            }
-        } else {
-            // Keychain UI prompts require the main thread — sync dispatch
-            DispatchQueue.main.sync {
-                let status = SecItemCopyMatching(query as CFDictionary, &result)
-                if status == errSecSuccess,
-                   let data = result as? Data,
-                   let k = String(data: data, encoding: .utf8) { key = k }
-                else if status != errSecSuccess {
-                    usageLogger.error("Cursor: Keychain access failed (status=\(status))")
-                }
-            }
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let key = String(data: data, encoding: .utf8) else {
+            usageLogger.error("Cursor: Keychain access failed (status=\(status))")
+            return nil
         }
         return key
     }
