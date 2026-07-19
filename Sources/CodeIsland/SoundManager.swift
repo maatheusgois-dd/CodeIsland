@@ -32,9 +32,9 @@ class SoundManager {
     func handleEvent(_ eventName: String) {
         guard defaults.bool(forKey: SettingsKey.soundEnabled) else { return }
         guard !quietHoursActive else { return }
-        // Suppress notification sounds while the user is typing (off by default).
+        // Defer notification sounds until the user stops typing (off by default).
         // Waits 5s after the last keystroke before resuming.
-        if defaults.bool(forKey: SettingsKey.suppressWhileTyping),
+        if defaults.bool(forKey: SettingsKey.awaitFinishTyping),
            KeyboardActivityMonitor.shared.isTyping {
             return
         }

@@ -1010,6 +1010,34 @@ final class AppState {
         return !isTerminalFrontmost(session)
     }
 
+    /// True if the panel should be deferred because the user is typing.
+    /// When enabled, approval/question popups wait until 5s after the last
+    /// keystroke so the user isn't interrupted mid-sentence.
+    var isDeferringForTyping: Bool {
+        guard UserDefaults.standard.bool(forKey: SettingsKey.awaitFinishTyping) else { return false }
+        return KeyboardActivityMonitor.shared.isTyping
+    }
+
+    /// Retry timer: when a permission/question is deferred because the user
+    /// is typing, re-check every 1s. Once the user stops typing for 5s,
+    /// showNextPending() fires and opens the panel.
+    private var typingDeferRetryTask: Task<Void, Never>?
+
+    func scheduleTypingDeferRetry() {
+        guard isDeferringForTyping else { return }
+        typingDeferRetryTask?.cancel()
+        typingDeferRetryTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, !Task.isCancelled else { return }
+                if !self.isDeferringForTyping {
+                    _ = self.showNextPending()
+                    return
+                }
+            }
+        }
+    }
+
     private func shouldAutoOpenQuestionSurface(for event: HookEvent) -> Bool {
         // AskUserQuestion holds the provider/CLI until its continuation resolves,
         // so there is no parallel terminal prompt for Smart Suppress to defer to.
@@ -1366,7 +1394,10 @@ final class AppState {
             activeSessionId = sessionId
             // If user is already browsing the session list, keep them there and
             // let inline controls handle approval without stealing focus.
-            if surface != .sessionList, shouldAutoOpenPendingSurface(for: sessionId) {
+            if isDeferringForTyping {
+                // Defer opening the panel until the user stops typing.
+                scheduleTypingDeferRetry()
+            } else if surface != .sessionList, shouldAutoOpenPendingSurface(for: sessionId) {
                 surface = .approvalCard(sessionId: sessionId)
             }
             SoundManager.shared.handleEvent("PermissionRequest")
@@ -1934,6 +1965,14 @@ final class AppState {
     /// After dequeuing, show next pending item or collapse
     @discardableResult
     func showNextPending() -> Bool {
+        // Defer showing approval/question popups while the user is typing.
+        // Schedule a retry so the panel opens once the user stops (5s after
+        // the last keystroke).
+        if isDeferringForTyping,
+           !permissionQueue.isEmpty || !questionQueue.isEmpty {
+            scheduleTypingDeferRetry()
+            return false
+        }
         if let idx = nextVisiblePermissionIndex() {
             let next = permissionQueue.remove(at: idx)
             permissionQueue.insert(next, at: 0)

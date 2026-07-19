@@ -1177,7 +1177,7 @@ private struct SoundPage: View {
     @AppStorage(SettingsKey.quietHoursEnabled) private var quietHoursEnabled = SettingsDefaults.quietHoursEnabled
     @AppStorage(SettingsKey.quietHoursStart) private var quietHoursStart = SettingsDefaults.quietHoursStart
     @AppStorage(SettingsKey.quietHoursEnd) private var quietHoursEnd = SettingsDefaults.quietHoursEnd
-    @AppStorage(SettingsKey.suppressWhileTyping) private var suppressWhileTyping = SettingsDefaults.suppressWhileTyping
+    @AppStorage(SettingsKey.awaitFinishTyping) private var awaitFinishTyping = SettingsDefaults.awaitFinishTyping
 
     /// DatePicker works in wall-clock Dates; storage is minutes since midnight.
     private func timeBinding(_ minutes: Binding<Int>) -> Binding<Date> {
@@ -1268,8 +1268,8 @@ private struct SoundPage: View {
 
                 Section {
                     VStack(alignment: .leading, spacing: 2) {
-                        Toggle("Suppress while typing", isOn: $suppressWhileTyping)
-                        Text("Mute notification sounds while you're typing. Resumes 5s after the last keystroke. No keystrokes are recorded.")
+                        Toggle("Await finish typing", isOn: $awaitFinishTyping)
+                        Text("Defer approval prompts, question cards, and notification sounds until you stop typing. Shows 5s after the last keystroke. No keystrokes are recorded.")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                     }
