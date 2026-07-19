@@ -400,69 +400,159 @@ public enum ClaudeUsageScanner {
         cache: inout FileCache,
         activeFiles: inout Set<String>
     ) {
-        guard let workspaces = try? fm.contentsOfDirectory(atPath: cursorStorage) else { return }
-        for ws in workspaces {
-            let dbPath = cursorStorage + "/" + ws + "/state.vscdb"
-            guard fm.fileExists(atPath: dbPath) else { continue }
-            // Use the vscdb mtime as a cheap gate.
-            guard let attrs = try? fm.attributesOfItem(atPath: dbPath),
-                  let mtime = attrs[.modificationDate] as? Date,
-                  mtime >= cutoff else { continue }
+        let cacheKey = "cursor:usage-csv"
+        let csvPath = NSHomeDirectory() + "/.codeisland/cursor-usage.csv"
 
-            let cacheKey = "cursor:\(ws)"
-            activeFiles.insert(cacheKey)
-            var entry = cache.files[cacheKey] ?? FileCache.FileEntry()
-            entry.source = "Cursor"
-
-            // Read aiService.generations from ItemTable.
-            let generations = readCursorGenerations(dbPath: dbPath, consumedCount: entry.seenIds.count)
-            for gen in generations {
-                let id = "cursor-gen-\(gen.unixMs)"
-                guard !entry.seenIds.contains(id) else { continue }
-                entry.seenIds.insert(id)
-                let date = Date(timeIntervalSince1970: TimeInterval(gen.unixMs) / 1000)
-                guard date >= cutoff else { continue }
-                var totals = ClaudeUsageTotals()
-                totals.messageCount = 1
-                entry.entries.append(.init(timestamp: date, usage: totals))
+        // Try to fetch fresh CSV from Cursor's usage export API.
+        // Uses the session token from Cursor's globalStorage state.vscdb.
+        let globalStorageDb = cursorStorage.replacingOccurrences(
+            of: "/User/workspaceStorage",
+            with: "/User/globalStorage/state.vscdb"
+        )
+        if let token = readCursorSessionToken(dbPath: globalStorageDb) {
+            if let csv = fetchCursorUsageCSV(token: token) {
+                try? csv.write(toFile: csvPath, atomically: true, encoding: .utf8)
             }
-            entry.entries.removeAll { $0.timestamp < cutoff }
-            cache.files[cacheKey] = entry
         }
+
+        // Parse the cached CSV (either freshly fetched or from a previous run).
+        guard fm.fileExists(atPath: csvPath),
+              let attrs = try? fm.attributesOfItem(atPath: csvPath),
+              let mtime = attrs[.modificationDate] as? Date,
+              mtime >= cutoff.addingTimeInterval(-Double(historyDays) * 86_400)
+        else { return }
+
+        activeFiles.insert(cacheKey)
+        var entry = cache.files[cacheKey] ?? FileCache.FileEntry()
+        entry.source = "Cursor"
+
+        let rows = parseCursorUsageCSV(path: csvPath)
+        for row in rows {
+            let id = "cursor-csv-\(row.date.timeIntervalSince1970)-\(row.model)"
+            guard !entry.seenIds.contains(id) else { continue }
+            entry.seenIds.insert(id)
+            guard row.date >= cutoff else { continue }
+            entry.entries.append(.init(timestamp: row.date, usage: row.usage))
+        }
+        entry.entries.removeAll { $0.timestamp < cutoff }
+        cache.files[cacheKey] = entry
     }
 
-    /// Read aiService.generations JSON array from a Cursor state.vscdb.
-    /// Returns (unixMs, description) tuples — only the timestamp matters for
-    /// usage tracking; Cursor doesn't persist token counts.
-    private static func readCursorGenerations(dbPath: String, consumedCount: Int) -> [(unixMs: Int64, desc: String)] {
-        // Open SQLite and query ItemTable for aiService.generations.
+    /// Read the Cursor session token from globalStorage/state.vscdb.
+    private static func readCursorSessionToken(dbPath: String) -> String? {
         var db: OpaquePointer?
         guard sqlite3_open(dbPath, &db) == SQLITE_OK else {
             sqlite3_close(db)
-            return []
+            return nil
         }
         defer { sqlite3_close(db) }
-
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT value FROM ItemTable WHERE key = 'aiService.generations' LIMIT 1", -1, &stmt, nil) == SQLITE_OK else {
-            return []
+        guard sqlite3_prepare_v2(db, "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1", -1, &stmt, nil) == SQLITE_OK else {
+            return nil
         }
         defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard let cString = sqlite3_column_text(stmt, 0) else { return nil }
+        return String(cString: cString)
+    }
 
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return [] }
-        let cString = sqlite3_column_text(stmt, 0)
-        guard let cString else { return [] }
-        let jsonString = String(cString: cString)
+    /// Fetch the usage CSV from Cursor's dashboard export API.
+    /// Returns the CSV text, or nil on failure (expired token, network error).
+    private static func fetchCursorUsageCSV(token: String) -> String? {
+        let url = URL(string: "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens")!
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("https://www.cursor.com/settings", forHTTPHeaderField: "Referer")
+        request.setValue("WorkosCursorSessionToken=\(token)", forHTTPHeaderField: "Cookie")
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: String?
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            if let data { result = String(data: data, encoding: .utf8) }
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 10)
+        return result
+    }
 
-        guard let data = jsonString.data(using: .utf8),
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return [] }
+    /// Parse a Cursor usage CSV file (tokscale-compatible: v1/v2/v3 formats).
+    /// Returns (date, model, usage) for each row.
+    private static func parseCursorUsageCSV(path: String) -> [(date: Date, model: String, usage: ClaudeUsageTotals)] {
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        guard lines.count > 1 else { return [] }
 
-        return arr.compactMap { item in
-            guard let ms = item["unixMs"] as? Int64 else { return nil }
-            let desc = item["textDescription"] as? String ?? ""
-            return (ms, desc)
+        let header = parseCSVLine(lines[0])
+        guard header.contains("Date"), header.contains("Model") else { return [] }
+
+        // Detect format by checking for "Kind" column and column count.
+        let hasKind = header.contains { $0.trimmingCharacters(in: .whitespaces) == "Kind" }
+        let (
+            modelIdx, inputCacheWriteIdx, inputNoCacheIdx, cacheReadIdx, outputIdx
+        ): (Int, Int, Int, Int, Int) = if hasKind && header.count >= 11 {
+            // v3: Date,Cloud Agent ID,Automation ID,Kind,Model,...
+            (4, 6, 7, 8, 9)
+        } else if hasKind {
+            // v2: Date,Kind,Model,Max Mode,Input (w/ Cache Write),...
+            (2, 4, 5, 6, 7)
+        } else {
+            // v1: Date,Model,Input (w/ Cache Write),...
+            (1, 2, 3, 4, 5)
         }
+
+        var results: [(date: Date, model: String, usage: ClaudeUsageTotals)] = []
+        for line in lines.dropFirst() {
+            let fields = parseCSVLine(line)
+            guard fields.count > outputIdx else { continue }
+            let dateStr = fields[0].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let model = fields[modelIdx].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            guard model.isEmpty == false else { continue }
+            guard let date = parseCursorDate(dateStr) else { continue }
+
+            let inputWithCache = Int(fields[inputCacheWriteIdx].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))) ?? 0
+            let inputNoCache = Int(fields[inputNoCacheIdx].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))) ?? 0
+            let cacheRead = Int(fields[cacheReadIdx].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))) ?? 0
+            let output = Int(fields[outputIdx].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))) ?? 0
+
+            var totals = ClaudeUsageTotals()
+            totals.inputTokens = max(0, inputNoCache)
+            totals.outputTokens = max(0, output)
+            totals.cacheReadTokens = max(0, cacheRead)
+            totals.cacheCreationTokens = max(0, inputWithCache - inputNoCache)
+            totals.messageCount = 1
+            results.append((date, model, totals))
+        }
+        return results
+    }
+
+    /// Parse a Cursor CSV date string (e.g. "2026-07-18 03:09:23") to Date.
+    private static func parseCursorDate(_ str: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let date = formatter.date(from: str) { return date }
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: str)
+    }
+
+    /// Simple CSV line parser handling quoted fields.
+    private static func parseCSVLine(_ line: String) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var inQuotes = false
+        for ch in line {
+            if inQuotes {
+                if ch == "\"" { inQuotes = false }
+                else { current.append(ch) }
+            } else {
+                if ch == "\"" { inQuotes = true }
+                else if ch == "," { fields.append(current); current = "" }
+                else { current.append(ch) }
+            }
+        }
+        fields.append(current)
+        return fields
     }
     private static let fractionalFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()

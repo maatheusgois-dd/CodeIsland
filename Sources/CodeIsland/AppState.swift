@@ -216,6 +216,7 @@ final class AppState {
 
     private let customNamesKey = "customSessionNames"
     private(set) var customNamesRevision: Int = 0
+    var renamingSessionId: String?
 
     func customDisplayName(for sessionId: String) -> String? {
         guard let raw = UserDefaults.standard.string(forKey: customNamesKey) else { return nil }

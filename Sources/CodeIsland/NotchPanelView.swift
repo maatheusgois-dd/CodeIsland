@@ -1702,10 +1702,18 @@ private struct SessionListView: View {
     /// When set, only show this session (auto-expand on completion)
     var onlySessionId: String? = nil
     @AppStorage(SettingsKey.sessionGroupingMode) private var groupingMode = SettingsDefaults.sessionGroupingMode
+    @State private var cachedGroups: [(header: String, source: String?, ids: [String])]?
     @AppStorage(SettingsKey.maxVisibleSessions) private var maxVisibleSessions = SettingsDefaults.maxVisibleSessions
     @AppStorage(SettingsKey.showUsageStats) private var showUsageStats = SettingsDefaults.showUsageStats
-
     private var groupedSessions: [(header: String, source: String?, ids: [String])] {
+        // While renaming, freeze the list so the TextField keeps focus.
+        if appState.renamingSessionId != nil, let cached = cachedGroups {
+            return cached
+        }
+        return computeGroupedSessions()
+    }
+
+    private func computeGroupedSessions() -> [(header: String, source: String?, ids: [String])] {
         if let only = onlySessionId, appState.sessions[only] != nil {
             return [("", nil, [only])]
         }
@@ -1869,6 +1877,13 @@ private struct SessionListView: View {
             if showUsageStats, onlySessionId == nil, let usage = appState.claudeUsage,
                !(usage.last5h.isEmpty && usage.today.isEmpty) {
                 UsageFooterLine(usage: usage)
+            }
+        }
+        .onChange(of: appState.renamingSessionId) { _, newValue in
+            if newValue != nil {
+                cachedGroups = computeGroupedSessions()
+            } else {
+                cachedGroups = nil
             }
         }
     }
@@ -2275,8 +2290,12 @@ private struct SessionCard: View {
                             onSubmit: {
                                 appState.setCustomDisplayName(renameText, for: sessionId)
                                 showRenameField = false
+                                appState.renamingSessionId = nil
                             },
-                            onCancel: { showRenameField = false }
+                            onCancel: {
+                                showRenameField = false
+                                appState.renamingSessionId = nil
+                            }
                         )
                     } else {
                         SessionIdentityLine(
@@ -2457,6 +2476,7 @@ private struct SessionCard: View {
         .contextMenu {
             Button {
                 renameText = appState.customDisplayName(for: sessionId) ?? session.projectDisplayName
+                appState.renamingSessionId = sessionId
                 showRenameField = true
             } label: {
                 Label("Rename", systemImage: "pencil")
