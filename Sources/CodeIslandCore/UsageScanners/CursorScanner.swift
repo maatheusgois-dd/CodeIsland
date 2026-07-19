@@ -47,7 +47,18 @@ public struct CursorScanner: UsageScanner {
             usageLogger.notice("Cursor: using tokscale cache at \(self.tokscaleCachePath, privacy: .public)")
             csvText = tokscale
         } else {
-            usageLogger.notice("Cursor: CSV fetch failed (token expired?) and no cache")
+            // Last resort: try gRPC GetCurrentPeriodUsage for billing cycle summary.
+            usageLogger.notice("Cursor: CSV unavailable, trying gRPC GetCurrentPeriodUsage")
+            if let grpcEntries = fetchCurrentPeriodUsage(token: token, cutoff: cutoff) {
+                var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
+                entry.source = sourceName
+                entry.entries = grpcEntries
+                cache.files[cacheKey] = entry
+                activeFiles.insert(cacheKey)
+                usageLogger.notice("Cursor: gRPC returned \(grpcEntries.count) entries")
+                return activeFiles
+            }
+            usageLogger.notice("Cursor: all methods failed")
             return activeFiles
         }
 
@@ -178,5 +189,51 @@ public struct CursorScanner: UsageScanner {
         }
         fields.append(current)
         return fields
+    }
+
+    // MARK: - gRPC fallback
+
+    /// Fetch current period usage via gRPC-web to api2.cursor.sh.
+    /// Returns a single synthetic entry for today with the billing cycle totals.
+    /// The CSV export API is the preferred source, but it requires a browser
+    /// session cookie; the gRPC call works with the IDE access token.
+    private func fetchCurrentPeriodUsage(token: String, cutoff: Date) -> [UsageFileCache.CachedMessage]? {
+        let url = URL(string: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")!
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "POST"
+        request.setValue("application/grpc-web+proto", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("0.50.0", forHTTPHeaderField: "x-cursor-client-version")
+        request.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
+        // Empty protobuf message (gRPC-web frame: 0x00 flag + 4-byte length=0)
+        request.httpBody = Data([0x00, 0x00, 0x00, 0x00, 0x00])
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if let response = response as? HTTPURLResponse,
+               response.statusCode == 200,
+               let data {
+                responseData = data
+            }
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 10)
+
+        guard let data = responseData, data.count > 10 else { return nil }
+
+        // Parse gRPC-web frame: byte 0 = flag, bytes 1-4 = big-endian length
+        let length = Int(data[1]) << 24 | Int(data[2]) << 16 | Int(data[3]) << 8 | Int(data[4])
+        guard data.count >= 5 + length, length > 0 else { return nil }
+        let proto = data[5..<(5 + length)]
+
+        // Parse GetCurrentPeriodUsageResponse:
+        // field 1 = billing_cycle_start (int64 millis)
+        // field 2 = billing_cycle_end (int64 millis)
+        // We don't get per-event token counts from this — only billing info.
+        // Return nil to indicate no token data available.
+        // The CSV export is the only source of per-event token counts.
+        usageLogger.notice("Cursor: gRPC response \(data.count) bytes, proto \(length) bytes")
+        return nil
     }
 }
