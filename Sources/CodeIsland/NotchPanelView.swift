@@ -1895,19 +1895,44 @@ private struct UsageFooterLine: View {
     let usage: ClaudeUsageScanner.Snapshot
     var appState: AppState?
     @ObservedObject private var l10n = L10n.shared
+    @State private var sourceIndex = 0
+    private let rotationTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+
+    private var sources: [SourceTotals] {
+        usage.perSource.filter { !$0.total.isEmpty }
+    }
+
+    private var currentSource: SourceTotals? {
+        let s = sources
+        guard !s.isEmpty else { return nil }
+        return s[min(sourceIndex, s.count - 1)]
+    }
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "gauge.with.needle")
                 .font(.system(size: 9, weight: .semibold))
-            Text("Claude")
-                .fontWeight(.semibold)
-            Text("5h \(compact(usage.last5h))")
-            Text("·")
-                .foregroundStyle(.white.opacity(0.25))
-            Text("\(l10n["usage_today"]) \(compact(usage.today))")
+            if let src = currentSource {
+                Text(src.name)
+                    .fontWeight(.semibold)
+                Text("5h \(compact(src.dailyTotals.last ?? ClaudeUsageTotals()))")
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.25))
+                Text("\(l10n["usage_today"]) \(compact(src.dailyTotals.last ?? ClaudeUsageTotals()))")
+            } else {
+                Text("Claude")
+                    .fontWeight(.semibold)
+                Text("5h \(compact(usage.last5h))")
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.25))
+                Text("\(l10n["usage_today"]) \(compact(usage.today))")
+            }
             Spacer()
-            UsageSparkline(buckets: usage.hourlyOutputTokens)
+            if let src = currentSource {
+                UsageSourceBarsCompact(dailyTotals: src.dailyTotals, color: sourceColor(src.name))
+            } else {
+                UsageSparkline(buckets: usage.hourlyOutputTokens)
+            }
         }
         .font(.system(size: 10, weight: .medium, design: .monospaced))
         .foregroundStyle(.white.opacity(0.45))
@@ -1918,6 +1943,20 @@ private struct UsageFooterLine: View {
             appState?.surface = .collapsed
             SettingsWindowController.shared.show(page: .usage)
         }
+        .onReceive(rotationTimer) { _ in
+            let s = sources
+            if !s.isEmpty { sourceIndex = (sourceIndex + 1) % s.count }
+        }
+    }
+
+    private func sourceColor(_ name: String) -> Color {
+        switch name {
+        case "Claude Code": return .orange
+        case "OMP": return .teal
+        case "Codex": return Color(red: 0.6, green: 0.6, blue: 0.6)
+        case "Cursor": return Color(red: 0.93, green: 0.93, blue: 0.93)
+        default: return .teal
+        }
     }
 
     private func compact(_ t: ClaudeUsageTotals) -> String {
@@ -1925,10 +1964,35 @@ private struct UsageFooterLine: View {
     }
 
     private var detail: String {
+        if let src = currentSource {
+            func line(_ label: String, _ t: ClaudeUsageTotals) -> String {
+                "\(label): in \(ClaudeUsageScanner.formatTokens(t.inputTokens)) · out \(ClaudeUsageScanner.formatTokens(t.outputTokens)) · cache \(ClaudeUsageScanner.formatTokens(t.cacheCreationTokens + t.cacheReadTokens))"
+            }
+            let today = src.dailyTotals.last ?? ClaudeUsageTotals()
+            return "\(src.name)\n" + line("5h", today) + "\n" + line(l10n["usage_today"], today)
+        }
         func line(_ label: String, _ t: ClaudeUsageTotals) -> String {
             "\(label): in \(ClaudeUsageScanner.formatTokens(t.inputTokens)) · out \(ClaudeUsageScanner.formatTokens(t.outputTokens)) · cache write \(ClaudeUsageScanner.formatTokens(t.cacheCreationTokens)) · cache read \(ClaudeUsageScanner.formatTokens(t.cacheReadTokens))"
         }
         return line("5h", usage.last5h) + "\n" + line(l10n["usage_today"], usage.today)
+    }
+}
+
+/// Compact sparkline for the notch footer — shows per-source daily bars.
+private struct UsageSourceBarsCompact: View {
+    let dailyTotals: [ClaudeUsageTotals]
+    var color: Color = .teal
+
+    var body: some View {
+        let peak = max(dailyTotals.map { $0.inputTokens + $0.outputTokens }.max() ?? 0, 1)
+        HStack(alignment: .bottom, spacing: 1) {
+            ForEach(Array(dailyTotals.enumerated()), id: \.offset) { _, total in
+                let value = total.inputTokens + total.outputTokens
+                RoundedRectangle(cornerRadius: 0.5)
+                    .fill(value == 0 ? Color.gray.opacity(0.15) : color.opacity(0.6))
+                    .frame(width: 2, height: max(1.5, CGFloat(value) / CGFloat(peak) * 12))
+            }
+        }
     }
 }
 
