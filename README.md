@@ -13,6 +13,62 @@
 
 ---
 
+## What's New in This Fork
+
+### Token Usage Dashboard (Settings → Usage)
+
+A full **per-AI token usage breakdown** showing input, output, cache, and message counts across all four AI sources:
+
+- **Claude Code** — scans `~/.claude/projects/**/*.jsonl`
+- **OMP (Oh My Pi)** — scans `~/.omp/agent/sessions/**/*.jsonl`
+- **Codex** — scans `~/.codex/sessions/**/*.jsonl` (uses `last_token_usage` delta, not cumulative)
+- **Cursor** — extracts usage from Chrome session cookie via the Cursor CSV export API
+
+#### Features
+
+- **14-day summary** — total input/output/cache/messages across all sources
+- **Per-AI breakdown** — each source with its mascot icon, brand color, and progress bar
+- **Daily usage chart** — 14-day bar chart with per-day token counts
+- **Last 12 hours sparkline** — hourly output tokens with hour-of-day labels
+- **Billion (B) formatting** — large token counts display as 1.1B, 344M, etc.
+- **Notch footer rotation** — cycles through each AI source every 60 seconds showing 5h/today totals
+- **Footer click → Settings → Usage** — click the notch footer to open the full usage page
+
+#### Cursor Setup (Settings → Usage → Cursor Usage Setup)
+
+Cursor doesn't store token counts locally. CodeIsland extracts them via:
+
+- **Manual cookie extraction** — paste `WorkosCursorSessionToken` from DevTools → Application → Cookies, fetch CSV via API
+- **Manual CSV extraction** — download CSV from cursor.com export API, import the file
+- **Cookie saved in macOS Keychain** — secure storage, no plaintext files, `kSecAttrAccessibleAfterFirstUnlock`
+- **Auto-refresh** — toggle + interval picker (1h/3h/6h/12h/24h), uses saved cookie, no Keychain prompt
+- **URL decoding** — handles `%3A%3A` → `::` in cookie values from DevTools
+- **Privacy** — all data stays on your Mac, nothing shared, no telemetry
+
+### Session Management
+
+- **Right-click rename** on session cards — context menu with Rename / Reset Name / Star
+- **Rename freeze** — session list freezes during rename to prevent TextField losing focus
+- **Custom names** stored in UserDefaults
+- **Star/favorite** sessions — gold highlight, stable sort by startTime
+- **`$ Ready` status** — shows in green when session is idle
+- **Cursor multi-window fix** — `cursor -r --reuse-window <cwd>` CLI for reliable window jumping
+
+### Extension & Proxy
+
+- **OMP bridge proxy** and **Codex proxy** — auto-installed via LaunchAgents (RunAtLoad + KeepAlive)
+- **Active-only tracking** — sessions removed after 5 min of inactivity
+- **Extension timeout fix** — narrowed dangerous patterns to only `rm -rf /`, `rm -rf ~`, `rm -rf $HOME` (safe `rm -rf .build` passes through)
+- **20s bridge timeout** with 5s hard outer timeout on socket sends
+- **CODEISLAND_DEBUG=1** environment variable for extension logging
+
+### Architecture
+
+- **Protocol-based usage scanners** — `UsageScanner` protocol with one struct per source (`ClaudeCodeScanner`, `OMPScanner`, `CodexScanner`, `CursorScanner`), coordinated by `UsageScannerCoordinator`
+- **Codex cumulative token fix** — uses `last_token_usage` (delta) not `total_token_usage` (cumulative), cache invalidated on each scan
+- **Cursor cookie extraction** — Chrome Safe Storage Keychain + PBKDF2-HMAC-SHA1 + AES-128-CBC decrypt (same technique as `pycookiecheat`/spinnaker-mcp), reimplemented in Swift with `CommonCrypto`
+
+
 <p align="center">
   <img src="docs/images/notch-panel.png" width="700" alt="CodeIsland Panel Preview">
 </p>
