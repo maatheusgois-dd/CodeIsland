@@ -2650,8 +2650,23 @@ private struct CursorSetupCard: View {
                         .foregroundStyle(.teal)
                     Text("2. Open browser DevTools (⌥⌘J) → Application tab → Cookies → cursor.com")
                         .font(.caption)
-                    Text("3. Find WorkosCursorSessionToken (HttpOnly — not visible via document.cookie)")
-                        .font(.caption)
+                    HStack(spacing: 4) {
+                        Text("3. Find")
+                            .font(.caption)
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString("WorkosCursorSessionToken", forType: .string)
+                            refreshResult = "✓ Cookie name copied to clipboard"
+                        } label: {
+                            Text("WorkosCursorSessionToken")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.teal)
+                                .underline()
+                        }
+                        .buttonStyle(.plain)
+                        Text("(HttpOnly — not visible via document.cookie)")
+                            .font(.caption)
+                    }
                     Text("4. Double-click the value, copy it, and paste below:")
                         .font(.caption)
                     HStack(spacing: 4) {
