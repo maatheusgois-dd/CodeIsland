@@ -2600,9 +2600,14 @@ private struct CursorSetupCard: View {
                     HStack(spacing: 8) {
                         Image(systemName: "key.fill")
                             .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.purple)
+                            .foregroundStyle(hasSavedCookie ? .green : .purple)
                         Text("Manual cookie extraction")
                             .font(.subheadline.weight(.medium))
+                        if hasSavedCookie {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                        }
                         Spacer()
                         Image(systemName: showManualCookie ? "chevron.up" : "chevron.down")
                             .font(.caption)
@@ -2623,9 +2628,14 @@ private struct CursorSetupCard: View {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.text.magnifyingglass")
                             .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.teal)
+                            .foregroundStyle(hasCSV ? .green : .teal)
                         Text("Manual CSV extraction")
                             .font(.subheadline.weight(.medium))
+                        if hasCSV {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                        }
                         Spacer()
                         Image(systemName: showManualCSV ? "chevron.up" : "chevron.down")
                             .font(.caption)
