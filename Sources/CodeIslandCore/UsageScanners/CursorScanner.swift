@@ -86,6 +86,19 @@ public struct CursorScanner: UsageScanner {
         return true
     }
 
+    /// Fetch CSV using a manually-provided session token (cookie value).
+    public func refreshCSVWithCookie(_ cookie: String) -> Bool {
+        let token = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return false }
+        guard let csv = fetchCursorUsageCSV(token: token), !csv.hasPrefix("<") else {
+            usageLogger.notice("Cursor: CSV fetch failed with manual cookie")
+            return false
+        }
+        try? csv.write(toFile: csvCachePath, atomically: true, encoding: .utf8)
+        usageLogger.notice("Cursor: CSV fetched with manual cookie (\(csv.count) bytes)")
+        return true
+    }
+
     /// Save a manually-provided CSV string (e.g. pasted from the browser console).
     public func saveManualCSV(_ csv: String) -> Bool {
         guard !csv.hasPrefix("<"), csv.contains("Date") else { return false }
