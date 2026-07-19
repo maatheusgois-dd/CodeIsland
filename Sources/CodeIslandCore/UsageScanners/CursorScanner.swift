@@ -444,8 +444,13 @@ public struct CursorScanner: UsageScanner {
     }
 
     /// Read the Chrome Safe Storage password from the macOS Keychain.
+    /// Uses the legacy SecKeychain API which can access another app's
+    /// Keychain item with a user-authorization prompt — this works even
+    /// for ad-hoc / self-signed apps where SecItemCopyMatching returns
+    /// errSecInteractionNotAllowed.
     /// Caller must be on the main thread for the Keychain permission dialog.
     private func readChromeSafeStorageKey() -> String? {
+        // First try the modern SecItemCopyMatching API.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Chrome Safe Storage",
@@ -455,10 +460,56 @@ public struct CursorScanner: UsageScanner {
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let key = String(data: data, encoding: .utf8) else {
-            usageLogger.error("Cursor: Keychain access failed (status=\(status))")
+        if status == errSecSuccess,
+           let data = result as? Data,
+           let key = String(data: data, encoding: .utf8) {
+            return key
+        }
+
+        // Fall back to the legacy SecKeychain API. This API allows access
+        // to any keychain item by prompting the user for authorization,
+        // even for ad-hoc signed apps. It returns errSecAuthFailed when
+        // the item's ACL doesn't include us, then prompts the user.
+        usageLogger.notice("Cursor: SecItemCopyMatching failed (status=\(status)), trying legacy Keychain API")
+
+        var keychainRef: SecKeychain?
+        let keychainStatus = SecKeychainCopyDefault(&keychainRef)
+        guard keychainStatus == errSecSuccess, let kcRef = keychainRef else {
+            usageLogger.error("Cursor: SecKeychainCopyDefault failed (status=\(keychainStatus))")
+            return nil
+        }
+
+        var itemRef: SecKeychainItem?
+        var dataLen: UInt32 = 0
+        var dataPtr: UnsafeMutableRawPointer?
+
+        // SecKeychainFindGenericPassword returns errSecAuthFailed when the
+        // item's access list doesn't include us, which triggers the user
+        // authorization dialog. We pass nil for accessRef so it uses the
+        // item's existing access control.
+        let findStatus = SecKeychainFindGenericPassword(
+            kcRef,
+            UInt32("Chrome Safe Storage".lengthOfBytes(using: .utf8)),
+            "Chrome Safe Storage",
+            UInt32("Chrome".lengthOfBytes(using: .utf8)),
+            "Chrome",
+            &dataLen,
+            &dataPtr,
+            &itemRef
+        )
+
+        guard findStatus == errSecSuccess, let ptr = dataPtr else {
+            usageLogger.error("Cursor: SecKeychainFindGenericPassword failed (status=\(findStatus))")
+            return nil
+        }
+
+        let keyData = Data(bytes: ptr, count: Int(dataLen))
+        // SecKeychainFindGenericPassword data must be freed by the caller.
+        SecKeychainItemFreeContent(nil, ptr)
+        if let item = itemRef { _ = item } // released via ARC
+
+        guard let key = String(data: keyData, encoding: .utf8) else {
+            usageLogger.error("Cursor: Chrome Safe Storage key not valid UTF-8")
             return nil
         }
         return key
