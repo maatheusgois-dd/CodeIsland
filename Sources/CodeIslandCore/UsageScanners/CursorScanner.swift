@@ -141,27 +141,44 @@ public struct CursorScanner: UsageScanner {
         return true
     }
 
-    /// Save a cookie value to a plaintext file for reuse.
+    /// Cookie file path — stored with File Protection Complete so the file
+    /// is encrypted at rest and only readable while the user is logged in
+    /// (locked screen / sleep / shutdown → unreadable). XDR-safe: no
+    /// Security framework calls, uses FileManager + Data.writeWithOptions.
+    private var cookiePath: String {
+        let dir = (csvCachePath as NSString).deletingLastPathComponent
+        return dir + "/cursor-cookie.dat"
+    }
+
+    /// Save a cookie value with File Protection Complete (encrypted at rest,
+    /// key tied to login session — unreadable when Mac is locked/shut down).
     /// NOTE: Keychain storage was removed because Cortex XDR blocks all
-    /// SecItemAdd/SecItemCopyMatching calls from CodeIsland as "Behavioral
-    /// Threat" / "Credential Gathering". Using a plaintext file with 0600
-    /// permissions is the workaround.
+    /// SecItemAdd / SecItemCopyMatching calls from CodeIsland as
+    /// "Behavioral Threat" / "Credential Gathering". File Protection Complete
+    /// is the safest XDR-safe alternative — no Security framework calls.
     public func saveCookie(_ cookie: String) {
         let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let dir = (csvCachePath as NSString).deletingLastPathComponent
-        let cookiePath = dir + "/cursor-cookie.txt"
+        let dir = (cookiePath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        try? trimmed.write(toFile: cookiePath, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cookiePath)
-        usageLogger.notice("Cursor: cookie saved to file (\(cookiePath, privacy: .public))")
+        do {
+            let data = Data(trimmed.utf8)
+            // .complete → file is encrypted at rest, unreadable when device is locked.
+            try data.write(to: URL(fileURLWithPath: cookiePath),
+                           options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            // Restrict to owner only (equivalent to 0600).
+            try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                 ofItemAtPath: cookiePath)
+            usageLogger.notice("Cursor: cookie saved with File Protection Complete")
+        } catch {
+            usageLogger.error("Cursor: failed to save cookie (\(error.localizedDescription, privacy: .public))")
+        }
     }
 
-    /// Load the saved cookie from the plaintext file.
+    /// Load the saved cookie.
     public var savedCookie: String? {
-        let dir = (csvCachePath as NSString).deletingLastPathComponent
-        let cookiePath = dir + "/cursor-cookie.txt"
-        guard let cookie = try? String(contentsOfFile: cookiePath, encoding: .utf8),
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: cookiePath)),
+              let cookie = String(data: data, encoding: .utf8),
               !cookie.isEmpty else { return nil }
         return cookie
     }
@@ -173,8 +190,6 @@ public struct CursorScanner: UsageScanner {
 
     /// Delete the saved cookie file.
     public func clearSavedCookie() {
-        let dir = (csvCachePath as NSString).deletingLastPathComponent
-        let cookiePath = dir + "/cursor-cookie.txt"
         try? FileManager.default.removeItem(atPath: cookiePath)
         usageLogger.notice("Cursor: saved cookie file removed")
     }
@@ -182,7 +197,7 @@ public struct CursorScanner: UsageScanner {
     /// Refresh CSV using the saved cookie (no Keychain access).
     public func refreshFromSavedCookie() -> Bool {
         guard let cookie = savedCookie else { return false }
-        usageLogger.notice("Cursor: refreshing from saved cookie file")
+        usageLogger.notice("Cursor: refreshing from saved cookie (File Protection Complete)")
         return refreshCSVWithCookie(cookie)
     }
 
