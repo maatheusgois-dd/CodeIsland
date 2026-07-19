@@ -73,7 +73,7 @@ public struct CursorScanner: UsageScanner {
         var sessionToken: String?
         var failReason = "unknown"
 
-        // Chrome Keychain extraction removed — Cortex XDR blocks it.
+        // Chrome Keychain extraction removed — endpoint security blocks it.
 
         // Fallback: IDE session token (may not work for CSV API — different auth)
         if sessionToken == nil, let ideToken = readCursorSessionToken(dbPath: stateDBPath) {
@@ -96,7 +96,7 @@ public struct CursorScanner: UsageScanner {
     }
 
     /// Extract the WorkosCursorSessionToken from Chrome. USER-INITIATED ONLY —
-    /// Cortex XDR blocks Keychain access to Chrome's items, so this must
+    /// endpoint security blocks Keychain access to Chrome's items, so this must
     /// never be called automatically (at startup or during scan). Only the
     /// "Extract from Chrome" button calls this, so the user explicitly opts in.
     /// Dispatches to the next main-runloop tick so the Keychain dialog can
@@ -145,19 +145,19 @@ public struct CursorScanner: UsageScanner {
     private static let keychainAccount = "WorkosCursorSessionToken"
 
     /// Track the time the CursorScanner was first created. Keychain access
-    /// is delayed 10s after this to avoid Cortex XDR's startup behavioral
-    /// analysis — XDR kills the app if SecItem* calls happen too soon after
+    /// is delayed 10s after this to avoid endpoint security's startup behavioral
+    /// analysis — endpoint security kills the app if SecItem* calls happen too soon after
     /// launch. After 10s the app is "settled" and Keychain access is allowed.
     private static let firstLoadTime = Date()
 
-    /// Log a timestamped Keychain operation for debugging XDR blocks.
+    /// Log a timestamped Keychain operation for debugging endpoint security blocks.
     private func logKeychainOp(_ op: String, status: OSStatus = 0) {
         let elapsed = Int(Date().timeIntervalSince(Self.firstLoadTime))
         usageLogger.notice("Cursor: KEYCHAIN [+\(elapsed, privacy: .public)s] \(op, privacy: .public) status=\(status, privacy: .public)")
     }
 
     /// Guard: only allow Keychain access 10s after the scanner was first
-    /// created (≈ app launch). This avoids triggering Cortex XDR's
+    /// created (≈ app launch). This avoids triggering endpoint security's
     /// behavioral threat detection at startup.
     private var keychainReady: Bool {
         let elapsed = Date().timeIntervalSince(Self.firstLoadTime)
@@ -169,7 +169,7 @@ public struct CursorScanner: UsageScanner {
     }
 
     /// Save a cookie value to macOS Keychain. Delayed 10s after launch to
-    /// avoid XDR behavioral threat detection at startup.
+    /// avoid endpoint security behavioral threat detection at startup.
     public func saveCookie(_ cookie: String) {
         let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -479,7 +479,7 @@ public struct CursorScanner: UsageScanner {
     /// Requires the app to be code-signed (Developer ID or Apple Development)
     /// so SecItemCopyMatching can access Chrome's Keychain item with a
     /// user-authorization prompt. The legacy SecKeychain API is avoided
-    /// because it triggers Cortex XDR "Credential Gathering" alerts.
+    /// because it triggers endpoint security "Credential Gathering" alerts.
     /// Caller must be on the main thread for the Keychain permission dialog.
     private func readChromeSafeStorageKey() -> String? {
         let query: [String: Any] = [

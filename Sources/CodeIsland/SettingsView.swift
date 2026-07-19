@@ -2545,7 +2545,7 @@ private struct CursorSetupCard: View {
                         isRefreshing = false
                         refreshResult = hasSavedCookie
                             ? "Chrome extraction blocked by security. Using saved cookie — click 'Refresh now' below."
-                            : "Chrome extraction blocked by Cortex XDR. Use 'Manual cookie extraction' below."
+                            : "Chrome extraction blocked by endpoint security. Use 'Manual cookie extraction' below."
                         return
                     }
                     DispatchQueue.global(qos: .userInitiated).async {
