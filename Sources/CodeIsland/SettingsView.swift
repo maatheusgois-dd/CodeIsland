@@ -2541,22 +2541,24 @@ private struct CursorSetupCard: View {
                 isRefreshing = true
                 refreshResult = nil
                 // Chrome cookie extraction needs the main thread for the
-                // macOS Keychain permission dialog. Do extraction on main,
-                // then the network fetch on a background queue.
-                let token = scanner.extractChromeToken()
-                guard let sessionToken = token else {
-                    isRefreshing = false
-                    refreshResult = hasSavedCookie
-                        ? "Chrome extraction unavailable (unsigned app). Using saved cookie instead — click 'Refresh now' below."
-                        : "Chrome extraction needs Keychain access (unsigned app limitation). Use 'Manual cookie extraction' below instead."
-                    return
-                }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let ok = scanner.fetchAndCacheCSV(token: sessionToken)
-                    DispatchQueue.main.async {
+                // macOS Keychain permission dialog. We dispatch to the next
+                // main-runloop tick so the dialog can appear outside the
+                // SwiftUI action closure (which blocks Keychain UI).
+                scanner.extractChromeToken { sessionToken in
+                    guard let sessionToken = sessionToken else {
                         isRefreshing = false
-                        refreshResult = ok ? "✓ CSV fetched from Chrome" : "Failed — CSV fetch failed. Cookie may be expired."
-                        if ok { hasCSV = true; appState?.scanClaudeUsage() }
+                        refreshResult = hasSavedCookie
+                            ? "Chrome extraction unavailable (unsigned app). Using saved cookie instead — click 'Refresh now' below."
+                            : "Chrome extraction needs Keychain access (unsigned app limitation). Use 'Manual cookie extraction' below instead."
+                        return
+                    }
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let ok = scanner.fetchAndCacheCSV(token: sessionToken)
+                        DispatchQueue.main.async {
+                            isRefreshing = false
+                            refreshResult = ok ? "✓ CSV fetched from Chrome" : "Failed — CSV fetch failed. Cookie may be expired."
+                            if ok { hasCSV = true; appState?.scanClaudeUsage() }
+                        }
                     }
                 }
             } label: {

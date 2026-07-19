@@ -102,17 +102,34 @@ public struct CursorScanner: UsageScanner {
         return true
     }
 
-    /// Extract the WorkosCursorSessionToken from Chrome. Call this on the
- /// main thread — the Keychain access for Chrome Safe Storage may prompt
- /// the user for permission, which requires the main thread.
- public func extractChromeToken() -> String? {
-     if let chromeToken = readChromeCursorSessionToken() {
-         usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
-         return chromeToken
-     }
-     usageLogger.notice("Cursor: Chrome cookie extraction failed — Keychain access may have been denied")
-     return nil
- }
+    /// Extract the WorkosCursorSessionToken from Chrome. Dispatches the
+    /// Keychain access to the next main-runloop tick so the authorization
+    /// dialog can appear (calling SecItemCopyMatching / the legacy
+    /// SecKeychain API directly inside a SwiftUI button action returns
+    /// errSecInteractionNotAllowed without prompting).
+    /// Must be called on the main thread; `completion` is invoked on main.
+    public func extractChromeToken(completion: @escaping (String?) -> Void) {
+        DispatchQueue.main.async { [self] in
+            if let chromeToken = readChromeCursorSessionToken() {
+                usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
+                completion(chromeToken)
+            } else {
+                usageLogger.notice("Cursor: Chrome cookie extraction failed — Keychain access may have been denied")
+                completion(nil)
+            }
+        }
+    }
+
+    /// Synchronous variant — only safe when NOT called from a SwiftUI
+    /// action closure (e.g. from a background queue). Kept for tests.
+    public func extractChromeTokenSync() -> String? {
+        if let chromeToken = readChromeCursorSessionToken() {
+            usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
+            return chromeToken
+        }
+        usageLogger.notice("Cursor: Chrome cookie extraction failed — Keychain access may have been denied")
+        return nil
+    }
 
  /// Fetch the CSV from the Cursor API and cache it. Can run on any thread.
  public func fetchAndCacheCSV(token: String) -> Bool {
@@ -444,13 +461,16 @@ public struct CursorScanner: UsageScanner {
     }
 
     /// Read the Chrome Safe Storage password from the macOS Keychain.
-    /// Uses the legacy SecKeychain API which can access another app's
-    /// Keychain item with a user-authorization prompt — this works even
-    /// for ad-hoc / self-signed apps where SecItemCopyMatching returns
-    /// errSecInteractionNotAllowed.
+    /// The legacy SecKeychain API is tried first because it reliably
+    /// shows the authorization dialog for unsigned / ad-hoc apps;
+    /// SecItemCopyMatching returns errSecInteractionNotAllowed silently.
     /// Caller must be on the main thread for the Keychain permission dialog.
     private func readChromeSafeStorageKey() -> String? {
-        // First try the modern SecItemCopyMatching API.
+        if let key = readChromeSafeStorageKeyLegacy() {
+            return key
+        }
+
+        // Fall back to the modern SecItemCopyMatching API.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Chrome Safe Storage",
@@ -465,13 +485,13 @@ public struct CursorScanner: UsageScanner {
            let key = String(data: data, encoding: .utf8) {
             return key
         }
+        usageLogger.error("Cursor: Keychain access failed — legacy and SecItemCopyMatching (status=\(status))")
+        return nil
+    }
 
-        // Fall back to the legacy SecKeychain API. This API allows access
-        // to any keychain item by prompting the user for authorization,
-        // even for ad-hoc signed apps. It returns errSecAuthFailed when
-        // the item's ACL doesn't include us, then prompts the user.
-        usageLogger.notice("Cursor: SecItemCopyMatching failed (status=\(status)), trying legacy Keychain API")
-
+    /// Legacy SecKeychain API — prompts the user for authorization when the
+    /// item's ACL doesn't include us. Works for unsigned / ad-hoc apps.
+    private func readChromeSafeStorageKeyLegacy() -> String? {
         var keychainRef: SecKeychain?
         let keychainStatus = SecKeychainCopyDefault(&keychainRef)
         guard keychainStatus == errSecSuccess, let kcRef = keychainRef else {
@@ -483,10 +503,6 @@ public struct CursorScanner: UsageScanner {
         var dataLen: UInt32 = 0
         var dataPtr: UnsafeMutableRawPointer?
 
-        // SecKeychainFindGenericPassword returns errSecAuthFailed when the
-        // item's access list doesn't include us, which triggers the user
-        // authorization dialog. We pass nil for accessRef so it uses the
-        // item's existing access control.
         let findStatus = SecKeychainFindGenericPassword(
             kcRef,
             UInt32("Chrome Safe Storage".lengthOfBytes(using: .utf8)),
@@ -499,12 +515,11 @@ public struct CursorScanner: UsageScanner {
         )
 
         guard findStatus == errSecSuccess, let ptr = dataPtr else {
-            usageLogger.error("Cursor: SecKeychainFindGenericPassword failed (status=\(findStatus))")
+            usageLogger.notice("Cursor: SecKeychainFindGenericPassword failed (status=\(findStatus))")
             return nil
         }
 
         let keyData = Data(bytes: ptr, count: Int(dataLen))
-        // SecKeychainFindGenericPassword data must be freed by the caller.
         SecKeychainItemFreeContent(nil, ptr)
         if let item = itemRef { _ = item } // released via ARC
 
@@ -512,6 +527,7 @@ public struct CursorScanner: UsageScanner {
             usageLogger.error("Cursor: Chrome Safe Storage key not valid UTF-8")
             return nil
         }
+        usageLogger.notice("Cursor: Chrome Safe Storage key read via legacy Keychain API")
         return key
     }
 
