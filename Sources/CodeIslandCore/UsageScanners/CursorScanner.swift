@@ -127,8 +127,11 @@ public struct CursorScanner: UsageScanner {
 
     /// Fetch CSV using a manually-provided session token (cookie value).
     public func refreshCSVWithCookie(_ cookie: String) -> Bool {
-        let token = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        var token = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { return false }
+        // URL-decode: DevTools shows %3A%3A for :: — the API needs the decoded value
+        token = token.removingPercentEncoding ?? token
+        usageLogger.notice("Cursor: fetching CSV with manual cookie (len=\(token.count), decoded=\(token != cookie))")
         guard let csv = fetchCursorUsageCSV(token: token), !csv.hasPrefix("<") else {
             usageLogger.notice("Cursor: CSV fetch failed with manual cookie")
             return false

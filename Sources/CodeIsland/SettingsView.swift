@@ -2488,8 +2488,8 @@ private struct CursorSetupCard: View {
     @State private var showFileImporter = false
     @State private var showConfirmDelete = false
     @State private var saveCookieForReuse = false
-    @State private var autoRefreshEnabled = false
-    @State private var autoRefreshHours = 1
+    @AppStorage("cursor.autoRefreshEnabled") private var autoRefreshEnabled = false
+    @AppStorage("cursor.autoRefreshHours") private var autoRefreshHours = 1
     @State private var hasSavedCookie = false
     weak var appState: AppState?
 
@@ -2590,7 +2590,10 @@ private struct CursorSetupCard: View {
             // Manual extraction options — grouped with tight spacing
             VStack(spacing: 4) {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { showManualCSV.toggle() }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showManualCSV.toggle()
+                        if showManualCSV { showManualCookie = false }
+                    }
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.text.magnifyingglass")
@@ -2610,7 +2613,10 @@ private struct CursorSetupCard: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { showManualCookie.toggle() }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showManualCookie.toggle()
+                        if showManualCookie { showManualCSV = false }
+                    }
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "key.fill")
@@ -2632,12 +2638,17 @@ private struct CursorSetupCard: View {
 
             if showManualCSV {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("1. Open")
-                    Link("cursor.com/dashboard/usage", destination: URL(string: "https://cursor.com/dashboard/usage")!)
-                        .foregroundStyle(.teal)
-                    Text("2. Click \"Export\" on the Cursor dashboard to download the CSV")
+                    Text("1. Download the CSV:")
                         .font(.caption)
-                    Text("3. Import the downloaded file:")
+                    Link(destination: URL(string: "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens")!) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle")
+                            Text("Download usage CSV")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.teal)
+                    }
+                    Text("2. Import the downloaded file:")
                         .font(.caption)
                     Button {
                         showFileImporter = true
