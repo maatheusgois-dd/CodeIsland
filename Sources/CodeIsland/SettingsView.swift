@@ -2558,12 +2558,18 @@ private struct CursorSetupCard: View {
                     }
                 }
             } label: {
-                HStack(spacing: 4) {
-                    if isRefreshing { ProgressView().scaleEffect(0.7) }
-                    Image(systemName: "wand.and.stars")
-                    Text("Extract from Chrome")
+                HStack(spacing: 6) {
+                    if isRefreshing {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Image(systemName: "wand.and.stars")
+                    }
+                    Text(isRefreshing ? "Extracting…" : "Extract from Chrome")
                     Spacer()
                 }
+                .frame(height: 20)
             }
             .buttonStyle(.bordered)
             .disabled(isRefreshing)
@@ -2733,10 +2739,17 @@ private struct CursorSetupCard: View {
                             }
                         }
                     } label: {
-                        HStack(spacing: 4) {
-                            if isFetchingCookie { ProgressView().scaleEffect(0.7) }
-                            Text("Fetch CSV")
+                        HStack(spacing: 6) {
+                            if isFetchingCookie {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                                    .frame(width: 14, height: 14)
+                            } else {
+                                Image(systemName: "arrow.down.circle.fill")
+                            }
+                            Text(isFetchingCookie ? "Fetching…" : "Fetch CSV")
                         }
+                        .frame(height: 20)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isFetchingCookie || manualCookie.isEmpty)
