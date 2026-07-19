@@ -2541,63 +2541,61 @@ private struct CursorSetupCard: View {
             .buttonStyle(.bordered)
             .disabled(isRefreshing)
 
-            // Open cursor.com + Remove CSV
-            HStack(spacing: 12) {
-                Button {
-                    if let url = URL(string: "https://cursor.com/dashboard/usage") {
-                        NSWorkspace.shared.open(url)
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "safari")
-                        Text("Open cursor.com")
-                    }
-                }
-                .buttonStyle(.bordered)
-
-                if hasCSV {
-                    Button(role: .destructive) {
-                        showConfirmDelete = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "trash")
-                            Text("Remove CSV")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .confirmationDialog("Remove cached Cursor CSV?",
-                        isPresented: $showConfirmDelete,
-                        titleVisibility: .visible) {
-                        Button("Remove", role: .destructive) {
-                            try? FileManager.default.removeItem(atPath: scanner.csvCachePath)
-                            hasCSV = false
-                            refreshResult = "CSV removed"
-                            appState?.scanClaudeUsage()
-                        }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("This deletes the cached Cursor usage CSV. You'll need to extract or paste it again to see Cursor data in the breakdown.")
-                    }
-                }
-            }
-
-            // Manual CSV extraction disclosure
+            // Open cursor.com
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) { showManualCSV.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: showManualCSV ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text("Manual CSV extraction")
-                        .font(.subheadline)
-                    Spacer()
+                if let url = URL(string: "https://cursor.com/dashboard/usage") {
+                    NSWorkspace.shared.open(url)
                 }
-                .contentShape(Rectangle())
-                .padding(.vertical, 10)
-                .padding(.horizontal, 6)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "safari")
+                    Text("Open cursor.com")
+                }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.bordered)
+
+            // Manual extraction options — grouped with tight spacing
+            VStack(spacing: 4) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showManualCSV.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.teal)
+                        Text("Manual CSV extraction")
+                            .font(.subheadline.weight(.medium))
+                        Spacer()
+                        Image(systemName: showManualCSV ? "chevron.up" : "chevron.down")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.background.tertiary))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showManualCookie.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "key.fill")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.purple)
+                        Text("Manual cookie extraction")
+                            .font(.subheadline.weight(.medium))
+                        Spacer()
+                        Image(systemName: showManualCookie ? "chevron.up" : "chevron.down")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.background.tertiary))
+                }
+                .buttonStyle(.plain)
+            }
 
             if showManualCSV {
                 VStack(alignment: .leading, spacing: 8) {
@@ -2627,8 +2625,8 @@ private struct CursorSetupCard: View {
                             defer { url.stopAccessingSecurityScopedResource() }
                             if let csv = try? String(contentsOf: url, encoding: .utf8),
                                scanner.saveManualCSV(csv) {
-                                refreshResult = "CSV imported"
-                                showManualCSV = false
+                                refreshResult = "✓ CSV imported successfully"
+                                withAnimation { showManualCSV = false }
                                 hasCSV = true
                                 appState?.scanClaudeUsage()
                             } else {
@@ -2641,42 +2639,32 @@ private struct CursorSetupCard: View {
                 }
             }
 
-            // Manual cookie extraction disclosure
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { showManualCookie.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: showManualCookie ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text("Manual cookie extraction")
-                        .font(.subheadline)
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-                .padding(.vertical, 10)
-                .padding(.horizontal, 6)
-            }
-            .buttonStyle(.plain)
-
             if showManualCookie {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("1. Open")
                     Link("cursor.com/dashboard/usage", destination: URL(string: "https://cursor.com/dashboard/usage")!)
                         .foregroundStyle(.teal)
-                    Text("2. Open browser DevTools (⌥⌘J) and paste:")
+                    Text("2. Open browser DevTools (⌥⌘J) → Application tab → Cookies → cursor.com")
                         .font(.caption)
-                    Text("document.cookie.split(';').find(c=>c.trim().startsWith('WorkosCursorSessionToken=')).split('=').pop()")
-                        .font(.system(size: 10, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(.background.tertiary))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.tertiary, lineWidth: 0.5))
-                    Text("3. Copy the cookie value and paste it below:")
+                    Text("3. Find WorkosCursorSessionToken (HttpOnly — not visible via document.cookie)")
                         .font(.caption)
-                    SecureField("WorkosCursorSessionToken", text: $manualCookie)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textFieldStyle(.roundedBorder)
+                    Text("4. Double-click the value, copy it, and paste below:")
+                        .font(.caption)
+                    HStack(spacing: 4) {
+                        SecureField("WorkosCursorSessionToken", text: $manualCookie)
+                            .font(.system(size: 11, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                        if !manualCookie.isEmpty {
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(manualCookie, forType: .string)
+                                refreshResult = "Cookie copied to clipboard"
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                     Button {
                         isFetchingCookie = true
                         let cookie = manualCookie
@@ -2684,10 +2672,10 @@ private struct CursorSetupCard: View {
                             let ok = scanner.refreshCSVWithCookie(cookie)
                             DispatchQueue.main.async {
                                 isFetchingCookie = false
-                                refreshResult = ok ? "CSV fetched via cookie" : "Failed — invalid or expired cookie"
                                 if ok {
+                                    refreshResult = "✓ CSV fetched via cookie"
                                     hasCSV = true
-                                    showManualCookie = false
+                                    withAnimation { showManualCookie = false }
                                     manualCookie = ""
                                     appState?.scanClaudeUsage()
                                 }
@@ -2709,6 +2697,33 @@ private struct CursorSetupCard: View {
                 Text(result)
                     .font(.caption)
                     .foregroundStyle(result.contains("Failed") || result.contains("Invalid") ? .red : .green)
+            }
+
+            // Destructive: remove cached CSV — at the end, only when cached
+            if hasCSV {
+                Button(role: .destructive) {
+                    showConfirmDelete = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "trash")
+                        Text("Remove CSV")
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .confirmationDialog("Remove cached Cursor CSV?",
+                    isPresented: $showConfirmDelete,
+                    titleVisibility: .visible) {
+                    Button("Remove", role: .destructive) {
+                        try? FileManager.default.removeItem(atPath: scanner.csvCachePath)
+                        hasCSV = false
+                        refreshResult = "CSV removed"
+                        appState?.scanClaudeUsage()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This deletes the cached Cursor usage CSV. You'll need to extract or paste it again to see Cursor data in the breakdown.")
+                }
             }
         }
         .padding()
