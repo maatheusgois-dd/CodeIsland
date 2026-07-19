@@ -1096,10 +1096,10 @@ private struct ApprovalBar: View {
 
             // Pixel-style buttons — badge the global shortcut when one is enabled
             HStack(spacing: 6) {
-                PixelButton(label: L10n.shared["deny"], fg: .white.opacity(0.95), bg: Color(red: 0.45, green: 0.12, blue: 0.12), border: Color(red: 0.7, green: 0.25, blue: 0.25), hint: Self.shortcutHint(.deny), action: onDeny)
-                PixelButton(label: L10n.shared["dismiss"], fg: .white.opacity(0.95), bg: Color(red: 0.25, green: 0.25, blue: 0.25), border: Color.white.opacity(0.28), action: onDismiss)
-                PixelButton(label: L10n.shared["allow_once"], fg: .white.opacity(0.95), bg: Color(red: 0.16, green: 0.38, blue: 0.18), border: Color(red: 0.28, green: 0.62, blue: 0.32), hint: Self.shortcutHint(.approve), action: onAllow)
-                PixelButton(label: L10n.shared["always"], fg: .white.opacity(0.95), bg: Color(red: 0.14, green: 0.28, blue: 0.52), border: Color(red: 0.28, green: 0.48, blue: 0.82), hint: Self.shortcutHint(.approveAlways), action: onAlwaysAllow)
+                PixelButton(label: L10n.shared["deny"], fg: .white.opacity(0.95), bg: Color(red: 0.52, green: 0.16, blue: 0.16), border: Color(red: 0.78, green: 0.32, blue: 0.32), hint: Self.shortcutHint(.deny), action: onDeny)
+                PixelButton(label: L10n.shared["dismiss"], fg: .white.opacity(0.85), bg: Color(red: 0.22, green: 0.22, blue: 0.24), border: Color.white.opacity(0.22), action: onDismiss)
+                PixelButton(label: L10n.shared["allow_once"], fg: .white.opacity(0.95), bg: Color(red: 0.18, green: 0.42, blue: 0.22), border: Color(red: 0.36, green: 0.68, blue: 0.42), hint: Self.shortcutHint(.approve), action: onAllow)
+                PixelButton(label: L10n.shared["always"], fg: .white.opacity(0.95), bg: Color(red: 0.18, green: 0.32, blue: 0.58), border: Color(red: 0.36, green: 0.54, blue: 0.88), hint: Self.shortcutHint(.approveAlways), action: onAlwaysAllow)
             }
             .padding(.horizontal, 14)
         }
@@ -1711,14 +1711,18 @@ private struct PixelButton: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 7)
+            // Flat fill — no gradient. Hover lightens the bg slightly and
+            // lifts the button with a soft shadow for a tactile feel.
             .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(hovering ? bg.opacity(1.5) : bg)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering ? bg.opacity(0.85) : bg)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(hovering ? border : border.opacity(0.4), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(border.opacity(hovering ? 0.9 : 0.5), lineWidth: 1)
             )
+            .shadow(color: .black.opacity(hovering ? 0.35 : 0.2), radius: hovering ? 3 : 1.5, y: hovering ? 1 : 0.5)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { h in withAnimation(NotchAnimation.micro) { hovering = h } }
