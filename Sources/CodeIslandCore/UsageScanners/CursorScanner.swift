@@ -29,13 +29,12 @@ public struct CursorScanner: UsageScanner {
     ) -> Set<String> {
         var activeFiles = Set<String>()
         let cacheKey = "cursor-csv"
-        // Fast path: use cached CSV if available and recent (< 1 hour old).
-        if let attrs = try? fm.attributesOfItem(atPath: csvCachePath),
-           let mtime = attrs[.modificationDate] as? Date,
-           Date().timeIntervalSince(mtime) < 3600,
-           let cached = try? String(contentsOfFile: csvCachePath, encoding: .utf8),
+        // Use cached CSV only. Chrome Keychain extraction is an explicit
+        // user action (see CursorScanner.refreshCSV) to avoid prompting
+        // for Keychain access on every app launch.
+        if let cached = try? String(contentsOfFile: csvCachePath, encoding: .utf8),
            !cached.hasPrefix("<") {
-            usageLogger.notice("Cursor: using recent cached CSV")
+            usageLogger.notice("Cursor: using cached CSV")
             var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
             entry.source = sourceName
             entry.entries = parseCursorUsageCSV(text: cached)
@@ -45,8 +44,26 @@ public struct CursorScanner: UsageScanner {
             usageLogger.notice("Cursor: \(entry.entries.count) entries in window")
             return activeFiles
         }
+        if let tokscale = try? String(contentsOfFile: tokscaleCachePath, encoding: .utf8),
+           !tokscale.hasPrefix("<") {
+            usageLogger.notice("Cursor: using tokscale cache")
+            var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
+            entry.source = sourceName
+            entry.entries = parseCursorUsageCSV(text: tokscale)
+            entry.entries.removeAll { $0.timestamp < cutoff }
+            cache.files[cacheKey] = entry
+            activeFiles.insert(cacheKey)
+            usageLogger.notice("Cursor: \(entry.entries.count) entries in window")
+            return activeFiles
+        }
+        usageLogger.notice("Cursor: no cached CSV — run refresh from Settings")
+        return activeFiles
+    }
 
-        // Try Chrome cookie (like spinnaker-mcp/pycookiecheat), then IDE token.
+    /// On-demand CSV refresh: extracts the Chrome cookie, fetches the CSV,
+    /// and caches it. Call this from a Settings button, not the automatic scan.
+    /// Returns true on success.
+    public func refreshCSV() -> Bool {
         var sessionToken: String?
         if let chromeToken = readChromeCursorSessionToken() {
             usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
@@ -57,57 +74,33 @@ public struct CursorScanner: UsageScanner {
             sessionToken = ideToken
         }
         guard let token = sessionToken else {
-            // Last resort: try any old cached CSV or tokscale cache.
-            if let cached = try? String(contentsOfFile: csvCachePath, encoding: .utf8), !cached.hasPrefix("<") {
-                usageLogger.notice("Cursor: using stale cached CSV (no token)")
-                var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
-                entry.source = sourceName
-                entry.entries = parseCursorUsageCSV(text: cached)
-                entry.entries.removeAll { $0.timestamp < cutoff }
-                cache.files[cacheKey] = entry
-                activeFiles.insert(cacheKey)
-                usageLogger.notice("Cursor: \(entry.entries.count) entries in window")
-            }
-            return activeFiles
+            usageLogger.notice("Cursor: no session token found for refresh")
+            return false
         }
-        // Try to fetch fresh CSV; fall back to cache.
-        var csvText: String?
-        if let fresh = fetchCursorUsageCSV(token: token), !fresh.hasPrefix("<") {
-            csvText = fresh
-            try? fresh.write(toFile: csvCachePath, atomically: true, encoding: .utf8)
-        } else if let cached = try? String(contentsOfFile: csvCachePath, encoding: .utf8),
-                  !cached.hasPrefix("<") {
-            usageLogger.notice("Cursor: using cached CSV")
-            csvText = cached
-        } else if let tokscale = try? String(contentsOfFile: tokscaleCachePath, encoding: .utf8),
-                  !tokscale.hasPrefix("<") {
-            usageLogger.notice("Cursor: using tokscale cache at \(self.tokscaleCachePath, privacy: .public)")
-            csvText = tokscale
-        } else {
-            // Last resort: try gRPC GetCurrentPeriodUsage for billing cycle summary.
-            usageLogger.notice("Cursor: CSV unavailable, trying gRPC GetCurrentPeriodUsage")
-            if let grpcEntries = fetchCurrentPeriodUsage(token: token, cutoff: cutoff) {
-                var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
-                entry.source = sourceName
-                entry.entries = grpcEntries
-                cache.files[cacheKey] = entry
-                activeFiles.insert(cacheKey)
-                usageLogger.notice("Cursor: gRPC returned \(grpcEntries.count) entries")
-                return activeFiles
-            }
-            usageLogger.notice("Cursor: all methods failed")
-            return activeFiles
+        guard let csv = fetchCursorUsageCSV(token: token), !csv.hasPrefix("<") else {
+            usageLogger.notice("Cursor: CSV fetch failed during refresh")
+            return false
         }
-
-        var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
-        entry.source = sourceName
-        entry.entries = parseCursorUsageCSV(text: csvText!)
-        entry.entries.removeAll { $0.timestamp < cutoff }
-        cache.files[cacheKey] = entry
-        activeFiles.insert(cacheKey)
-        usageLogger.notice("Cursor: \(entry.entries.count) entries in window")
-        return activeFiles
+        try? csv.write(toFile: csvCachePath, atomically: true, encoding: .utf8)
+        usageLogger.notice("Cursor: CSV refreshed and cached (\(csv.count) bytes)")
+        return true
     }
+
+    /// Save a manually-provided CSV string (e.g. pasted from the browser console).
+    public func saveManualCSV(_ csv: String) -> Bool {
+        guard !csv.hasPrefix("<"), csv.contains("Date") else { return false }
+        try? csv.write(toFile: csvCachePath, atomically: true, encoding: .utf8)
+        usageLogger.notice("Cursor: manual CSV saved (\(csv.count) bytes)")
+        return true
+    }
+
+    /// Check if a cached CSV exists.
+    public var hasCachedCSV: Bool {
+        guard let cached = try? String(contentsOfFile: csvCachePath, encoding: .utf8) else { return false }
+        return !cached.hasPrefix("<") && cached.contains("Date")
+    }
+
+
 
     // MARK: - Token reading
 

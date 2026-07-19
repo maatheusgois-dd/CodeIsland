@@ -2412,6 +2412,9 @@ private struct UsagePage: View {
                 }
                 .padding(.bottom, 5)
 
+                // Cursor setup card
+                CursorSetupCard(appState: appState)
+
                 if let usage = appState?.claudeUsage {
                     // 14-day summary
                     UsageSummaryCard(dailyTotals: usage.dailyTotals)
@@ -2453,6 +2456,151 @@ private struct UsagePage: View {
         }
         .onAppear { appState?.scanClaudeUsage() }
     }
+}
+
+/// Cursor setup card: lets the user extract the Chrome cookie, manually
+/// paste a CSV, or open cursor.com in the browser. The automatic scan does
+/// NOT touch the Keychain — the user must explicitly request it here.
+private struct CursorSetupCard: View {
+    @State private var isRefreshing = false
+    @State private var refreshResult: String?
+    @State private var showManualEntry = false
+    @State private var manualCSV = ""
+    weak var appState: AppState?
+
+    private let scanner = CursorScanner()
+
+    init(appState: AppState? = nil) {
+        self.appState = appState
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "cursorarrow.rays")
+                    .font(.headline)
+                    .foregroundStyle(.purple)
+                Text("Cursor Usage Setup")
+                    .font(.headline)
+                Spacer()
+                if scanner.hasCachedCSV {
+                    Text("CSV Cached")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else {
+                    Text("No CSV")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text("Cursor doesn't store token counts locally. CodeIsland extracts them from the CSV export API using your Chrome session cookie — the same technique as spinnaker-mcp.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                // Extract from Chrome button
+                Button {
+                    isRefreshing = true
+                    refreshResult = nil
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let ok = scanner.refreshCSV()
+                        DispatchQueue.main.async {
+                            isRefreshing = false
+                            refreshResult = ok ? "CSV fetched from Chrome" : "Failed — is Chrome logged into cursor.com?"
+                            if ok { appState?.scanClaudeUsage() }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        if isRefreshing { ProgressView().scaleEffect(0.7) }
+                        Image(systemName: "wand.and.stars")
+                        Text("Extract from Chrome")
+                    }
+                }
+                .disabled(isRefreshing)
+
+                // Open cursor.com button
+                Button {
+                    if let url = URL(string: "https://cursor.com/settings") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "safari")
+                        Text("Open cursor.com")
+                    }
+                }
+
+                // Manual paste button
+                Button {
+                    showManualEntry.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.on.clipboard")
+                        Text("Paste CSV")
+                    }
+                }
+            }
+            .buttonStyle(.bordered)
+
+            // JS console snippet
+            DisclosureGroup("Browser console script") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("1. Open cursor.com/settings and log in")
+                    Text("2. Open browser DevTools (⌥⌘J)")
+                    Text("3. Paste this in the console:")
+                        .font(.caption.monospaced())
+
+                    Text("fetch('/api/dashboard/export-usage-events-csv?strategy=tokens').then(r=>r.text()).then(t=>console.log(t.substring(0,200)+'...\\n\\nFull CSV copied to clipboard. Length: '+t.length+'\\n\\nSave to ~/.codeisland/cursor-usage.csv')||navigator.clipboard.writeText(t))")
+                        .font(.system(size: 10, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.background.tertiary))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.tertiary, lineWidth: 0.5))
+
+                    Text("4. Save the output to ~/.codeisland/cursor-usage.csv or use the Paste CSV button above")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 4)
+            }
+
+            if showManualEntry {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Paste CSV content:")
+                        .font(.caption)
+                    TextEditor(text: $manualCSV)
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(height: 120)
+                        .padding(4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.background.tertiary))
+
+                    Button("Save CSV") {
+                        if scanner.saveManualCSV(manualCSV) {
+                            refreshResult = "CSV saved"
+                            showManualEntry = false
+                            manualCSV = ""
+                            appState?.scanClaudeUsage()
+                        } else {
+                            refreshResult = "Invalid CSV — must contain a Date header"
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
+            if let result = refreshResult {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(result.contains("Failed") || result.contains("Invalid") ? .red : .green)
+            }
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
 }
 
 private struct UsageSummaryCard: View {
