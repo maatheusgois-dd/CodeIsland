@@ -2412,8 +2412,6 @@ private struct UsagePage: View {
                 }
                 .padding(.bottom, 5)
 
-                // Cursor setup card
-                CursorSetupCard(appState: appState)
 
                 if let usage = appState?.claudeUsage {
                     // 14-day summary
@@ -2442,6 +2440,7 @@ private struct UsagePage: View {
                         .padding()
                         .background(RoundedRectangle(cornerRadius: 10).fill(.background.secondary))
                     }
+
                 } else {
                     ContentUnavailableView(
                         "No Usage Data",
@@ -2449,6 +2448,9 @@ private struct UsagePage: View {
                         description: Text("Token usage data will appear here once you use Claude Code or OMP sessions.")
                     )
                 }
+
+                // Cursor setup — always visible, after usage data
+                CursorSetupCard(appState: appState)
 
                 Spacer()
             }
@@ -2545,10 +2547,32 @@ private struct CursorSetupCard: View {
             }
             .buttonStyle(.bordered)
 
-            // JS console snippet — entire row is a button
-            DisclosureGroup(isExpanded: $showConsoleScript) {
+            // JS console snippet — entire row is a clickable button
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { showConsoleScript.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: showConsoleScript ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("Browser console script")
+                        .font(.subheadline)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+                .padding(.vertical, 10)
+                .padding(.horizontal, 6)
+            }
+            .buttonStyle(.plain)
+
+            if showConsoleScript {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("1. Open cursor.com/dashboard/usage and log in")
+                    HStack(spacing: 4) {
+                        Text("1. Open")
+                        Link("cursor.com/dashboard/usage", destination: URL(string: "https://cursor.com/dashboard/usage")!)
+                            .foregroundStyle(.teal)
+                        Text("and log in")
+                    }
                     Text("2. Open browser DevTools (⌥⌘J)")
                     Text("3. Paste this in the console:")
                         .font(.caption.monospaced())
@@ -2564,19 +2588,7 @@ private struct CursorSetupCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.top, 8)
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: showConsoleScript ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("Browser console script")
-                        .font(.subheadline)
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-                .padding(.vertical, 8)
-                .padding(.horizontal, 4)
+                .padding(.top, 4)
             }
 
             if showManualEntry {
@@ -2645,6 +2657,28 @@ private struct UsageSummaryCard: View {
 private struct UsagePerSourceCard: View {
     let sources: [ClaudeUsageScanner.SourceTotals]
 
+    /// Map a usage source name to its mascot's brand color.
+    private func sourceColor(_ name: String) -> Color {
+        switch name {
+        case "Claude Code": return .orange      // Clawd — orange keyboard
+        case "OMP":          return .teal         // Pi — teal terminal
+        case "Codex":        return .gray         // Dex — black/white cloud
+        case "Cursor":      return Color(red: 0.93, green: 0.93, blue: 0.93) // Cursor — light face
+        default:            return .teal
+        }
+    }
+
+    /// Map a usage source name to the MascotView source identifier.
+    private func mascotSource(_ name: String) -> String {
+        switch name {
+        case "Claude Code": return "claude"
+        case "OMP":         return "omp"
+        case "Codex":       return "codex"
+        case "Cursor":      return "cursor"
+        default:            return ""
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Per-AI Breakdown (14 Days)")
@@ -2656,30 +2690,35 @@ private struct UsagePerSourceCard: View {
                 let allTotal = sources.reduce(0) { $0 + $1.total.inputTokens + $1.total.outputTokens
                     + $1.total.cacheCreationTokens + $1.total.cacheReadTokens }
                 let pct = allTotal > 0 ? Double(totalTokens) / Double(allTotal) * 100 : 0
+                let color = sourceColor(source.name)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack {
+                    HStack(spacing: 10) {
+                        // Small mascot icon
+                        MascotView(source: mascotSource(source.name), status: .idle, size: 24)
+                            .frame(width: 24, height: 24)
+
                         Text(source.name)
                             .font(.system(.body, design: .default).bold())
                         Spacer()
                         Text("\(ClaudeUsageScanner.formatTokens(totalTokens)) · \(String(format: "%.0f%%", pct))")
                             .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(color)
                     }
 
-                    // Progress bar
+                    // Progress bar — uses source color
                     GeometryReader { geo in
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.teal.opacity(0.3))
+                            .fill(color.opacity(0.2))
                             .overlay(alignment: .leading) {
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(Color.teal.opacity(0.7))
+                                    .fill(color.opacity(0.7))
                                     .frame(width: geo.size.width * CGFloat(pct / 100))
                             }
                     }
                     .frame(height: 6)
 
-                    // Mini stats
+                    // Mini stats — offset to align with text after mascot
                     HStack(spacing: 16) {
                         Text("In: \(ClaudeUsageScanner.formatTokens(source.total.inputTokens + source.total.cacheCreationTokens))")
                         Text("Out: \(ClaudeUsageScanner.formatTokens(source.total.outputTokens))")
@@ -2688,6 +2727,7 @@ private struct UsagePerSourceCard: View {
                     }
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .padding(.leading, 34) // align with text after 24pt mascot + 10pt spacing
                 }
                 .padding(.vertical, 4)
             }
@@ -2696,12 +2736,8 @@ private struct UsagePerSourceCard: View {
             if sources.count > 1 {
                 Divider().padding(.vertical, 4)
                 ForEach(sources, id: \.name) { source in
-                    HStack(spacing: 8) {
-                        Text(source.name)
-                            .font(.caption)
-                            .frame(width: 70, alignment: .leading)
-                        UsageSourceBars(dailyTotals: source.dailyTotals)
-                    }
+                    let color = sourceColor(source.name)
+                    UsageSourceBars(dailyTotals: source.dailyTotals, color: color)
                 }
             }
         }
@@ -2713,6 +2749,7 @@ private struct UsagePerSourceCard: View {
 
 private struct UsageSourceBars: View {
     let dailyTotals: [ClaudeUsageTotals]
+    var color: Color = .teal
 
     var body: some View {
         let peak = max(dailyTotals.map { $0.inputTokens + $0.outputTokens }.max() ?? 0, 1)
@@ -2721,7 +2758,7 @@ private struct UsageSourceBars: View {
                 ForEach(Array(dailyTotals.enumerated()), id: \.offset) { _, total in
                     let value = total.inputTokens + total.outputTokens
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.teal.opacity(0.5))
+                        .fill(color.opacity(0.5))
                         .frame(height: max(2, CGFloat(value) / CGFloat(peak) * geo.size.height))
                 }
             }
