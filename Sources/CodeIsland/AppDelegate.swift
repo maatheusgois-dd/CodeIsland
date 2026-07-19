@@ -28,6 +28,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // hooks get no response and Claude Code denies them.
         hookServer = HookServer(appState: appState)
         hookServer?.start()
+
+        // Start keyboard activity monitor (used by SoundManager to suppress
+        // notification sounds while the user is typing, if enabled in Settings).
+        KeyboardActivityMonitor.shared.start()
         RemoteManager.shared.onDisconnect = { [weak appState] hostId in
             appState?.removeRemoteSessions(hostId: hostId)
         }
@@ -167,7 +171,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         RemoteManager.shared.shutdown()
         hookServer?.stop()
         appState.stopCodexAppServerWatcher()
-        appState.stopSessionDiscovery()
+        KeyboardActivityMonitor.shared.stop()
     }
 
     // MARK: - Global Shortcuts

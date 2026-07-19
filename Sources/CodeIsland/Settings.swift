@@ -61,6 +61,8 @@ enum SettingsKey {
     static let quietHoursEnabled = "quietHoursEnabled"
     static let quietHoursStart = "quietHoursStart"
     static let quietHoursEnd = "quietHoursEnd"
+    // Suppress notification sounds while the user is typing (off by default)
+    static let suppressWhileTyping = "suppressWhileTyping"
 
     // Session cards
     static let showGitBranch = "showGitBranch"
@@ -160,6 +162,7 @@ struct SettingsDefaults {
     static let quietHoursEnabled = false
     static let quietHoursStart = 22 * 60
     static let quietHoursEnd = 8 * 60
+    static let suppressWhileTyping = false
     static let showGitBranch = true
     static let showUsageStats = true
 
@@ -240,6 +243,7 @@ class SettingsManager {
             SettingsKey.quietHoursEnabled: SettingsDefaults.quietHoursEnabled,
             SettingsKey.quietHoursStart: SettingsDefaults.quietHoursStart,
             SettingsKey.quietHoursEnd: SettingsDefaults.quietHoursEnd,
+            SettingsKey.suppressWhileTyping: SettingsDefaults.suppressWhileTyping,
             SettingsKey.showGitBranch: SettingsDefaults.showGitBranch,
             SettingsKey.showUsageStats: SettingsDefaults.showUsageStats,
             SettingsKey.rotationInterval: SettingsDefaults.rotationInterval,

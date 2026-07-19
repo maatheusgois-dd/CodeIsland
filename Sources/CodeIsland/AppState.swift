@@ -388,9 +388,13 @@ final class AppState {
         }
 
         // 4. Remove idle sessions past timeout (user setting, or 10 min default for no-monitor sessions)
+        //    Favorite (starred) sessions are never removed — they stay visible even
+        //    when idle so the user remembers to go back to them.
         let userTimeout = SettingsManager.shared.sessionTimeout
         let defaultStaleMinutes = 10  // for sessions without process monitor
+        let favorites = favoriteSessionIds
         for (key, session) in sessions where session.status == .idle {
+            guard !favorites.contains(key) else { continue }  // keep starred sessions
             let idleMinutes = Int(-session.lastActivity.timeIntervalSinceNow / 60)
             let hasMonitor = processMonitors[key] != nil
             if userTimeout > 0 && idleMinutes >= userTimeout {
@@ -658,7 +662,18 @@ final class AppState {
     /// Remove a session, clean up its monitor, and resume any pending continuations.
     /// Every removal path (cleanup timer, process exit, reducer effect) goes through here
     /// so leaked continuations / connections are impossible.
-    private func removeSession(_ sessionId: String) {
+    private func removeSession(_ sessionId: String, force: Bool = false) {
+        // Favorite (starred) sessions are never removed unless explicitly forced.
+        // They stay visible even when the process exits, so the user remembers
+        // to go back to them. The session will just show as idle/sleeping.
+        if !force && favoriteSessionIds.contains(sessionId) {
+            log.notice("Keeping favorite session \(sessionId, privacy: .public) — marking idle instead of removing")
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+            stopMonitor(sessionId)
+            return
+        }
         // Resume ALL pending continuations for this session
         drainPermissions(forSession: sessionId, reason: "removeSession")
         drainQuestions(forSession: sessionId, reason: "removeSession")
@@ -1272,7 +1287,7 @@ final class AppState {
             session.remoteHostId == hostId ? key : nil
         }
         for id in ids {
-            removeSession(id)
+            removeSession(id, force: true)
         }
         refreshDerivedState()
     }
