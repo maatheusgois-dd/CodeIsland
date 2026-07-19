@@ -256,13 +256,19 @@ public struct CursorScanner: UsageScanner {
         let semaphore = DispatchSemaphore(value: 0)
         var result: String?
         URLSession.shared.dataTask(with: request) { data, response, _ in
-            if let response = response as? HTTPURLResponse,
-               let data, let text = String(data: data, encoding: .utf8) {
-                if response.statusCode == 200 && !text.hasPrefix("<") {
-                    result = text
-                } else {
-                    usageLogger.notice("Cursor: HTTP \(response.statusCode), response starts with: \(String(text.prefix(50)), privacy: .public)")
+            if let response = response as? HTTPURLResponse {
+                let status = response.statusCode
+                if let data, let text = String(data: data, encoding: .utf8) {
+                    if status == 200 && !text.hasPrefix("<") {
+                        result = text
+                    } else {
+                        usageLogger.notice("Cursor: HTTP \(status), \(text.count) bytes, starts: \(String(text.prefix(80)), privacy: .public)")
+                    }
+                } else if status != 200 {
+                    usageLogger.notice("Cursor: HTTP \(status), no body")
                 }
+            } else {
+                usageLogger.notice("Cursor: no response")
             }
             semaphore.signal()
         }.resume()
