@@ -2536,20 +2536,16 @@ private struct CursorSetupCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            // Extract from Chrome — first button, on its own row
+            // Extract from Chrome — user-initiated, shows Keychain dialog
             Button {
                 isRefreshing = true
                 refreshResult = nil
-                // Chrome cookie extraction needs the main thread for the
-                // macOS Keychain permission dialog. We dispatch to the next
-                // main-runloop tick so the dialog can appear outside the
-                // SwiftUI action closure (which blocks Keychain UI).
                 scanner.extractChromeToken { sessionToken in
                     guard let sessionToken = sessionToken else {
                         isRefreshing = false
                         refreshResult = hasSavedCookie
-                            ? "Chrome extraction unavailable (unsigned app). Using saved cookie instead — click 'Refresh now' below."
-                            : "Chrome extraction needs Keychain access (unsigned app limitation). Use 'Manual cookie extraction' below instead."
+                            ? "Chrome extraction blocked by security. Using saved cookie — click 'Refresh now' below."
+                            : "Chrome extraction blocked by Cortex XDR. Use 'Manual cookie extraction' below."
                         return
                     }
                     DispatchQueue.global(qos: .userInitiated).async {

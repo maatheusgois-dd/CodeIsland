@@ -73,14 +73,7 @@ public struct CursorScanner: UsageScanner {
         var sessionToken: String?
         var failReason = "unknown"
 
-        // Try Chrome cookie extraction first
-        if let chromeToken = readChromeCursorSessionToken() {
-            usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
-            sessionToken = chromeToken
-        } else {
-            failReason = "chrome-cookie-extraction-failed"
-            usageLogger.notice("Cursor: Chrome cookie extraction failed — may need Keychain permission")
-        }
+        // Chrome Keychain extraction removed — Cortex XDR blocks it.
 
         // Fallback: IDE session token (may not work for CSV API — different auth)
         if sessionToken == nil, let ideToken = readCursorSessionToken(dbPath: stateDBPath) {
@@ -102,12 +95,12 @@ public struct CursorScanner: UsageScanner {
         return true
     }
 
-    /// Extract the WorkosCursorSessionToken from Chrome. Dispatches the
-    /// Keychain access to the next main-runloop tick so the authorization
-    /// dialog can appear (calling SecItemCopyMatching / the legacy
-    /// SecKeychain API directly inside a SwiftUI button action returns
-    /// errSecInteractionNotAllowed without prompting).
-    /// Must be called on the main thread; `completion` is invoked on main.
+    /// Extract the WorkosCursorSessionToken from Chrome. USER-INITIATED ONLY —
+    /// Cortex XDR blocks Keychain access to Chrome's items, so this must
+    /// never be called automatically (at startup or during scan). Only the
+    /// "Extract from Chrome" button calls this, so the user explicitly opts in.
+    /// Dispatches to the next main-runloop tick so the Keychain dialog can
+    /// appear outside the SwiftUI action closure.
     public func extractChromeToken(completion: @escaping (String?) -> Void) {
         DispatchQueue.main.async { [self] in
             if let chromeToken = readChromeCursorSessionToken() {
@@ -119,17 +112,7 @@ public struct CursorScanner: UsageScanner {
             }
         }
     }
-
-    /// Synchronous variant — only safe when NOT called from a SwiftUI
-    /// action closure (e.g. from a background queue). Kept for tests.
-    public func extractChromeTokenSync() -> String? {
-        if let chromeToken = readChromeCursorSessionToken() {
-            usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
-            return chromeToken
-        }
-        usageLogger.notice("Cursor: Chrome cookie extraction failed — Keychain access may have been denied")
-        return nil
-    }
+    public func extractChromeTokenSync() -> String? { nil }
 
  /// Fetch the CSV from the Cursor API and cache it. Can run on any thread.
  public func fetchAndCacheCSV(token: String) -> Bool {
@@ -157,75 +140,49 @@ public struct CursorScanner: UsageScanner {
         usageLogger.notice("Cursor: CSV fetched with manual cookie (\(csv.count) bytes)")
         return true
     }
-    private static let keychainService = "com.codeisland.cursor-cookie"
-    private static let keychainAccount = "WorkosCursorSessionToken"
 
-    /// Save a cookie value to macOS Keychain for secure reuse.
+    /// Save a cookie value to a plaintext file for reuse.
+    /// NOTE: Keychain storage was removed because Cortex XDR blocks all
+    /// SecItemAdd/SecItemCopyMatching calls from CodeIsland as "Behavioral
+    /// Threat" / "Credential Gathering". Using a plaintext file with 0600
+    /// permissions is the workaround.
     public func saveCookie(_ cookie: String) {
         let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let data = Data(trimmed.utf8)
-
-        // Delete any existing item first (avoids errSecDuplicateItem)
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status == errSecSuccess {
-            usageLogger.notice("Cursor: cookie saved to Keychain")
-        } else {
-            usageLogger.error("Cursor: failed to save cookie to Keychain (status=\(status))")
-        }
+        let dir = (csvCachePath as NSString).deletingLastPathComponent
+        let cookiePath = dir + "/cursor-cookie.txt"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? trimmed.write(toFile: cookiePath, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cookiePath)
+        usageLogger.notice("Cursor: cookie saved to file (\(cookiePath, privacy: .public))")
     }
 
-    /// Load the saved cookie from macOS Keychain.
+    /// Load the saved cookie from the plaintext file.
     public var savedCookie: String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let cookie = String(data: data, encoding: .utf8) else { return nil }
+        let dir = (csvCachePath as NSString).deletingLastPathComponent
+        let cookiePath = dir + "/cursor-cookie.txt"
+        guard let cookie = try? String(contentsOfFile: cookiePath, encoding: .utf8),
+              !cookie.isEmpty else { return nil }
         return cookie
     }
 
-    /// Check if a saved cookie exists in Keychain.
+    /// Check if a saved cookie exists.
     public var hasSavedCookie: Bool {
         savedCookie != nil
     }
 
-    /// Delete the saved cookie from macOS Keychain.
+    /// Delete the saved cookie file.
     public func clearSavedCookie() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
-        ]
-        SecItemDelete(query as CFDictionary)
-        usageLogger.notice("Cursor: saved cookie cleared from Keychain")
+        let dir = (csvCachePath as NSString).deletingLastPathComponent
+        let cookiePath = dir + "/cursor-cookie.txt"
+        try? FileManager.default.removeItem(atPath: cookiePath)
+        usageLogger.notice("Cursor: saved cookie file removed")
     }
 
-    /// Refresh CSV using the saved cookie from Keychain (no Chrome Keychain prompt).
+    /// Refresh CSV using the saved cookie (no Keychain access).
     public func refreshFromSavedCookie() -> Bool {
         guard let cookie = savedCookie else { return false }
-        usageLogger.notice("Cursor: refreshing from saved Keychain cookie")
+        usageLogger.notice("Cursor: refreshing from saved cookie file")
         return refreshCSVWithCookie(cookie)
     }
 
