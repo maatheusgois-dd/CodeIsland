@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 public struct ClaudeUsageTotals: Equatable, Sendable {
     public var inputTokens = 0
@@ -102,15 +103,19 @@ public enum ClaudeUsageScanner {
     public static func scan(
         claudeHome: String = NSHomeDirectory() + "/.claude",
         ompHome: String = NSHomeDirectory() + "/.omp",
+        codexHome: String = NSHomeDirectory() + "/.codex",
+        cursorStorage: String = NSHomeDirectory() + "/Library/Application Support/Cursor/User/workspaceStorage",
         now: Date = Date()
     ) -> Snapshot {
         var cache = FileCache()
-        return scan(claudeHome: claudeHome, ompHome: ompHome, now: now, cache: &cache)
+        return scan(claudeHome: claudeHome, ompHome: ompHome, codexHome: codexHome, cursorStorage: cursorStorage, now: now, cache: &cache)
     }
 
     public static func scan(
         claudeHome: String = NSHomeDirectory() + "/.claude",
         ompHome: String = NSHomeDirectory() + "/.omp",
+        codexHome: String = NSHomeDirectory() + "/.codex",
+        cursorStorage: String = NSHomeDirectory() + "/Library/Application Support/Cursor/User/workspaceStorage",
         now: Date = Date(),
         cache: inout FileCache
     ) -> Snapshot {
@@ -140,6 +145,17 @@ public enum ClaudeUsageScanner {
                 root: source.root, sourceName: source.name, parser: source.parser, fm: fm,
                 cutoff: cutoff, cache: &cache, activeFiles: &activeFiles)
         }
+
+        // Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (recursive)
+        enumerateRecursive(
+            root: codexHome + "/sessions", sourceName: "Codex", parser: parseCodexUsage,
+            fm: fm, cutoff: cutoff, cache: &cache, activeFiles: &activeFiles)
+
+        // Cursor: message count only (no token counts stored). Scan all
+        // workspaceStorage state.vscdb files for aiService.generations.
+        enumerateCursorUsage(
+            cursorStorage: cursorStorage, fm: fm, cutoff: cutoff,
+            cache: &cache, activeFiles: &activeFiles)
 
         // Per-source accumulators.
         var perSourceTotals: [String: ClaudeUsageTotals] = [:]
@@ -176,11 +192,12 @@ public enum ClaudeUsageScanner {
             }
         }
 
-        let perSource = sources.map { s in
+        let allSourceNames = ["Claude Code", "OMP", "Codex", "Cursor"]
+        let perSource = allSourceNames.map { name in
             SourceTotals(
-                name: s.name,
-                total: perSourceTotals[s.name] ?? ClaudeUsageTotals(),
-                dailyTotals: perSourceDaily[s.name] ?? [ClaudeUsageTotals](repeating: ClaudeUsageTotals(), count: historyDays)
+                name: name,
+                total: perSourceTotals[name] ?? ClaudeUsageTotals(),
+                dailyTotals: perSourceDaily[name] ?? [ClaudeUsageTotals](repeating: ClaudeUsageTotals(), count: historyDays)
             )
         }.filter { !$0.total.isEmpty }
 
@@ -306,6 +323,147 @@ public enum ClaudeUsageScanner {
         return (timestamp, messageId, totals)
     }
 
+
+    /// Parse one Codex transcript line. Codex emits `type: "event_msg"` with
+    /// `payload.type: "token_count"` containing `total_token_usage`. Each
+    /// `total_token_usage` is cumulative for the session, so we only record
+    /// the LAST one per session file — but the incremental cache dedupes by
+    /// the `id` field on the message, and token_count events have no `id`,
+    /// so we synthesize one from the timestamp.
+    static func parseCodexUsage(_ line: String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)? {
+        guard line.contains("\"token_count\""), line.contains("\"total_token_usage\"") else { return nil }
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["type"] as? String == "event_msg",
+              let timestampRaw = obj["timestamp"] as? String,
+              let timestamp = parseISO8601(timestampRaw),
+              let payload = obj["payload"] as? [String: Any],
+              payload["type"] as? String == "token_count",
+              let info = payload["info"] as? [String: Any],
+              let usage = info["total_token_usage"] as? [String: Any]
+        else { return nil }
+
+        var totals = ClaudeUsageTotals()
+        totals.inputTokens = usage["input_tokens"] as? Int ?? 0
+        totals.outputTokens = (usage["output_tokens"] as? Int ?? 0)
+            + (usage["reasoning_output_tokens"] as? Int ?? 0)
+        totals.cacheReadTokens = usage["cached_input_tokens"] as? Int ?? 0
+        totals.cacheCreationTokens = usage["cache_write_input_tokens"] as? Int ?? 0
+        totals.messageCount = 1
+        // Dedupe by timestamp — each token_count event has a unique timestamp.
+        let messageId = "codex-tc-\(timestampRaw)"
+        return (timestamp, messageId, totals)
+    }
+
+    /// Recursively walk a directory tree (Codex: sessions/YYYY/MM/DD/*.jsonl),
+    /// applying the same mtime gate and incremental cache as `enumerateProjects`.
+    private static func enumerateRecursive(
+        root: String,
+        sourceName: String,
+        parser: (String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)?,
+        fm: FileManager,
+        cutoff: Date,
+        cache: inout FileCache,
+        activeFiles: inout Set<String>
+    ) {
+        guard let enumerator = fm.enumerator(atPath: root) else { return }
+        while let subpath = enumerator.nextObject() as? String {
+            let full = root + "/" + subpath
+            guard subpath.hasSuffix(".jsonl") else { continue }
+            guard let attrs = try? fm.attributesOfItem(atPath: full),
+                  let mtime = attrs[.modificationDate] as? Date,
+                  mtime >= cutoff else { continue }
+            activeFiles.insert(full)
+            let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+
+            var entry = cache.files[full] ?? FileCache.FileEntry()
+            entry.source = sourceName
+            if size < entry.consumedBytes {
+                entry = FileCache.FileEntry()
+                entry.source = sourceName
+            }
+            if size > entry.consumedBytes {
+                consumeNewLines(path: full, parser: parser, into: &entry)
+            }
+            entry.entries.removeAll { $0.timestamp < cutoff }
+            cache.files[full] = entry
+        }
+    }
+
+    /// Scan Cursor workspaceStorage for aiService.generations in state.vscdb.
+    /// Cursor doesn't store token counts — only conversation metadata — so we
+    /// record one messageCount per generation (no token data).
+    private static func enumerateCursorUsage(
+        cursorStorage: String,
+        fm: FileManager,
+        cutoff: Date,
+        cache: inout FileCache,
+        activeFiles: inout Set<String>
+    ) {
+        guard let workspaces = try? fm.contentsOfDirectory(atPath: cursorStorage) else { return }
+        for ws in workspaces {
+            let dbPath = cursorStorage + "/" + ws + "/state.vscdb"
+            guard fm.fileExists(atPath: dbPath) else { continue }
+            // Use the vscdb mtime as a cheap gate.
+            guard let attrs = try? fm.attributesOfItem(atPath: dbPath),
+                  let mtime = attrs[.modificationDate] as? Date,
+                  mtime >= cutoff else { continue }
+
+            let cacheKey = "cursor:\(ws)"
+            activeFiles.insert(cacheKey)
+            var entry = cache.files[cacheKey] ?? FileCache.FileEntry()
+            entry.source = "Cursor"
+
+            // Read aiService.generations from ItemTable.
+            let generations = readCursorGenerations(dbPath: dbPath, consumedCount: entry.seenIds.count)
+            for gen in generations {
+                let id = "cursor-gen-\(gen.unixMs)"
+                guard !entry.seenIds.contains(id) else { continue }
+                entry.seenIds.insert(id)
+                let date = Date(timeIntervalSince1970: TimeInterval(gen.unixMs) / 1000)
+                guard date >= cutoff else { continue }
+                var totals = ClaudeUsageTotals()
+                totals.messageCount = 1
+                entry.entries.append(.init(timestamp: date, usage: totals))
+            }
+            entry.entries.removeAll { $0.timestamp < cutoff }
+            cache.files[cacheKey] = entry
+        }
+    }
+
+    /// Read aiService.generations JSON array from a Cursor state.vscdb.
+    /// Returns (unixMs, description) tuples — only the timestamp matters for
+    /// usage tracking; Cursor doesn't persist token counts.
+    private static func readCursorGenerations(dbPath: String, consumedCount: Int) -> [(unixMs: Int64, desc: String)] {
+        // Open SQLite and query ItemTable for aiService.generations.
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK else {
+            sqlite3_close(db)
+            return []
+        }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT value FROM ItemTable WHERE key = 'aiService.generations' LIMIT 1", -1, &stmt, nil) == SQLITE_OK else {
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return [] }
+        let cString = sqlite3_column_text(stmt, 0)
+        guard let cString else { return [] }
+        let jsonString = String(cString: cString)
+
+        guard let data = jsonString.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+
+        return arr.compactMap { item in
+            guard let ms = item["unixMs"] as? Int64 else { return nil }
+            let desc = item["textDescription"] as? String ?? ""
+            return (ms, desc)
+        }
+    }
     private static let fractionalFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

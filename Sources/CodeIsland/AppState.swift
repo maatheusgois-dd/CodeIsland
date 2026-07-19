@@ -211,6 +211,37 @@ final class AppState {
         favoritesRevision &+= 1  // trigger @Observable update
     }
 
+
+    // MARK: - Custom session display names
+
+    private let customNamesKey = "customSessionNames"
+    private(set) var customNamesRevision: Int = 0
+
+    func customDisplayName(for sessionId: String) -> String? {
+        guard let raw = UserDefaults.standard.string(forKey: customNamesKey) else { return nil }
+        let pairs = raw.split(separator: "\n").compactMap { line -> (String, String)? in
+            let parts = line.split(separator: "\t", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            return (String(parts[0]), String(parts[1]))
+        }
+        return pairs.first { $0.0 == sessionId }?.1
+    }
+
+    func setCustomDisplayName(_ name: String?, for sessionId: String) {
+        let current = UserDefaults.standard.string(forKey: customNamesKey) ?? ""
+        var pairs = current.split(separator: "\n").compactMap { line -> (String, String)? in
+            let parts = line.split(separator: "\t", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            return (String(parts[0]), String(parts[1]))
+        }
+        pairs.removeAll { $0.0 == sessionId }
+        if let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pairs.append((sessionId, name.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        let serialized = pairs.map { "\($0.0)\t\($0.1)" }.joined(separator: "\n")
+        UserDefaults.standard.set(serialized, forKey: customNamesKey)
+        customNamesRevision &+= 1
+    }
     /// Mark a session as "read" — clears its working status to idle so it
     /// stops showing as active. Called when the user clicks the card to
     /// acknowledge they've seen the response.

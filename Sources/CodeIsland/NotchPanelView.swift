@@ -1973,6 +1973,7 @@ private struct SessionIdentityLine: View {
     let sessionFontSize: CGFloat
     let sessionColor: Color
     let dividerColor: Color
+    var customName: String? = nil
     @AppStorage(SettingsKey.showGitBranch) private var showGitBranch = SettingsDefaults.showGitBranch
 
     private var displaySessionId: String { session.displaySessionId(sessionId: sessionId) }
@@ -1980,7 +1981,7 @@ private struct SessionIdentityLine: View {
     var body: some View {
         HStack(spacing: 4) {
             ProjectNameLink(
-                name: session.projectDisplayName,
+                name: customName ?? session.projectDisplayName,
                 cwd: session.cwd,
                 isInteractive: !session.isRemote,
                 fontSize: projectFontSize,
@@ -2024,6 +2025,38 @@ private struct SessionIdentityLine: View {
                     .fixedSize()
             }
         }
+    }
+}
+
+private struct RenameSessionField: View {
+    @Binding var text: String
+    let color: Color
+    let fontSize: CGFloat
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TextField("Session name", text: $text)
+                .font(.system(size: fontSize, weight: .bold, design: .monospaced))
+                .foregroundStyle(color)
+                .textFieldStyle(.plain)
+                .focused($isFocused)
+                .onSubmit(onSubmit)
+                .onExitCommand(perform: onCancel)
+            Button(action: onSubmit) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+            .buttonStyle(.plain)
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+        }
+        .onAppear { isFocused = true }
     }
 }
 
@@ -2153,6 +2186,8 @@ private struct SessionCard: View {
     @State private var hovering = false
     @State private var failureShakeOffset: CGFloat = 0
     @State private var jumpValidationTask: Task<Void, Never>?
+    @State private var showRenameField = false
+    @State private var renameText = ""
     @State private var showApprovalDetails = false
     @AppStorage(SettingsKey.contentFontSize) private var contentFontSize = SettingsDefaults.contentFontSize
     @AppStorage(SettingsKey.aiMessageLines) private var aiMessageLines = SettingsDefaults.aiMessageLines
@@ -2203,6 +2238,7 @@ private struct SessionCard: View {
     }
 
     var body: some View {
+        let _ = appState.customNamesRevision
         HStack(alignment: .center, spacing: 8) {
             // Column 1: Character + subagent icons
             VStack(spacing: 3) {
@@ -2231,15 +2267,29 @@ private struct SessionCard: View {
             VStack(alignment: .leading, spacing: 6) {
                 // Header: project name + optional session label + short ID
                 HStack(alignment: .center, spacing: 8) {
-                    SessionIdentityLine(
-                        session: session,
-                        sessionId: sessionId,
-                        projectFontSize: fontSize + 2,
-                        projectColor: statusNameColor,
-                        sessionFontSize: fontSize,
-                        sessionColor: .white.opacity(0.76),
-                        dividerColor: .white.opacity(0.28)
-                    )
+                    if showRenameField {
+                        RenameSessionField(
+                            text: $renameText,
+                            color: statusNameColor,
+                            fontSize: fontSize + 2,
+                            onSubmit: {
+                                appState.setCustomDisplayName(renameText, for: sessionId)
+                                showRenameField = false
+                            },
+                            onCancel: { showRenameField = false }
+                        )
+                    } else {
+                        SessionIdentityLine(
+                            session: session,
+                            sessionId: sessionId,
+                            projectFontSize: fontSize + 2,
+                            projectColor: statusNameColor,
+                            sessionFontSize: fontSize,
+                            sessionColor: .white.opacity(0.76),
+                            dividerColor: .white.opacity(0.28),
+                            customName: appState.customDisplayName(for: sessionId)
+                        )
+                    }
                     // Favorite star — always visible when favorited (gold),
                     // otherwise shows on hover as a dim outline.
                     FavoriteStarButton(
@@ -2403,7 +2453,29 @@ private struct SessionCard: View {
         .padding(.horizontal, 6)
         .offset(x: failureShakeOffset)
         .contentShape(Rectangle())
-        .onTapGesture { handleSessionClick() }
+        .onTapGesture { if !showRenameField { handleSessionClick() } }
+        .contextMenu {
+            Button {
+                renameText = appState.customDisplayName(for: sessionId) ?? session.projectDisplayName
+                showRenameField = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            if appState.customDisplayName(for: sessionId) != nil {
+                Button {
+                    appState.setCustomDisplayName(nil, for: sessionId)
+                } label: {
+                    Label("Reset Name", systemImage: "arrow.counterclockwise")
+                }
+            }
+            Divider()
+            Button {
+                appState.toggleFavorite(sessionId)
+            } label: {
+                Label(appState.isFavorite(sessionId) ? "Unstar" : "Star",
+                      systemImage: appState.isFavorite(sessionId) ? "star.slash" : "star")
+            }
+        }
         .onHover { h in withAnimation(NotchAnimation.micro) { hovering = h } }
         .onDisappear {
             jumpValidationTask?.cancel()
