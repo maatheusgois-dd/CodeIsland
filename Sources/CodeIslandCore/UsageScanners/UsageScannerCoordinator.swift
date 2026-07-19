@@ -46,11 +46,32 @@ public enum UsageScannerCoordinator {
             CursorScanner(cursorStorage: cursorStorage),
         ]
 
-        var allActiveFiles = Set<String>()
-        for scanner in scanners {
-            let active = scanner.scan(cache: &cache, cutoff: cutoff, fm: fm)
-            allActiveFiles.formUnion(active)
+        // Run all scanners concurrently — each only touches its own files
+        // (different directories), so cache.files keys never collide.
+        // Copy cache to a local value so escaping closures can capture it.
+        var baseCache = cache
+        let scannerCount = scanners.count
+        let results = (0..<scannerCount).map { _ in UnsafeBox<ScanResult?>(nil) }
+        let group = DispatchGroup()
+        for i in 0..<scannerCount {
+            group.enter()
+            DispatchQueue.global(qos: .utility).async {
+                var localCache = baseCache
+                let active = scanners[i].scan(cache: &localCache, cutoff: cutoff, fm: fm)
+                results[i].value = ScanResult(activeFiles: active, files: localCache.files)
+                group.leave()
+            }
         }
+        group.wait()
+
+        var allActiveFiles = Set<String>()
+        for r in results {
+            if let r = r.value {
+                allActiveFiles.formUnion(r.activeFiles)
+                baseCache.files.merge(r.files) { _, new in new }
+            }
+        }
+        cache = baseCache
 
         // Prune cache entries that fell out of the mtime window.
         cache.files = cache.files.filter { allActiveFiles.contains($0.key) }
@@ -105,4 +126,16 @@ public enum UsageScannerCoordinator {
             hourlyOutputTokens: hourly, dailyTotals: daily,
             perSource: perSource, scannedAt: now)
     }
+}
+
+/// Result of one scanner's run.
+private struct ScanResult {
+    let activeFiles: Set<String>
+    let files: [String: UsageFileCache.FileEntry]
+}
+
+/// Thread-safe box for storing a scan result from a background queue.
+private final class UnsafeBox<T> {
+    var value: T
+    init(_ value: T) { self.value = value }
 }

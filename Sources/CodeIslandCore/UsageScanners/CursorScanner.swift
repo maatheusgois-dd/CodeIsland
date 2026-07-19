@@ -461,16 +461,12 @@ public struct CursorScanner: UsageScanner {
     }
 
     /// Read the Chrome Safe Storage password from the macOS Keychain.
-    /// The legacy SecKeychain API is tried first because it reliably
-    /// shows the authorization dialog for unsigned / ad-hoc apps;
-    /// SecItemCopyMatching returns errSecInteractionNotAllowed silently.
+    /// Requires the app to be code-signed (Developer ID or Apple Development)
+    /// so SecItemCopyMatching can access Chrome's Keychain item with a
+    /// user-authorization prompt. The legacy SecKeychain API is avoided
+    /// because it triggers Cortex XDR "Credential Gathering" alerts.
     /// Caller must be on the main thread for the Keychain permission dialog.
     private func readChromeSafeStorageKey() -> String? {
-        if let key = readChromeSafeStorageKeyLegacy() {
-            return key
-        }
-
-        // Fall back to the modern SecItemCopyMatching API.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Chrome Safe Storage",
@@ -483,52 +479,11 @@ public struct CursorScanner: UsageScanner {
         if status == errSecSuccess,
            let data = result as? Data,
            let key = String(data: data, encoding: .utf8) {
+            usageLogger.notice("Cursor: Chrome Safe Storage key read via SecItemCopyMatching")
             return key
         }
-        usageLogger.error("Cursor: Keychain access failed — legacy and SecItemCopyMatching (status=\(status))")
+        usageLogger.error("Cursor: SecItemCopyMatching failed (status=\(status)) — app may be unsigned")
         return nil
-    }
-
-    /// Legacy SecKeychain API — prompts the user for authorization when the
-    /// item's ACL doesn't include us. Works for unsigned / ad-hoc apps.
-    private func readChromeSafeStorageKeyLegacy() -> String? {
-        var keychainRef: SecKeychain?
-        let keychainStatus = SecKeychainCopyDefault(&keychainRef)
-        guard keychainStatus == errSecSuccess, let kcRef = keychainRef else {
-            usageLogger.error("Cursor: SecKeychainCopyDefault failed (status=\(keychainStatus))")
-            return nil
-        }
-
-        var itemRef: SecKeychainItem?
-        var dataLen: UInt32 = 0
-        var dataPtr: UnsafeMutableRawPointer?
-
-        let findStatus = SecKeychainFindGenericPassword(
-            kcRef,
-            UInt32("Chrome Safe Storage".lengthOfBytes(using: .utf8)),
-            "Chrome Safe Storage",
-            UInt32("Chrome".lengthOfBytes(using: .utf8)),
-            "Chrome",
-            &dataLen,
-            &dataPtr,
-            &itemRef
-        )
-
-        guard findStatus == errSecSuccess, let ptr = dataPtr else {
-            usageLogger.notice("Cursor: SecKeychainFindGenericPassword failed (status=\(findStatus))")
-            return nil
-        }
-
-        let keyData = Data(bytes: ptr, count: Int(dataLen))
-        SecKeychainItemFreeContent(nil, ptr)
-        if let item = itemRef { _ = item } // released via ARC
-
-        guard let key = String(data: keyData, encoding: .utf8) else {
-            usageLogger.error("Cursor: Chrome Safe Storage key not valid UTF-8")
-            return nil
-        }
-        usageLogger.notice("Cursor: Chrome Safe Storage key read via legacy Keychain API")
-        return key
     }
 
     /// Derive the 16-byte AES key using PBKDF2-HMAC-SHA1 (Chrome's scheme).
