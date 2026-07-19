@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import CommonCrypto
 
 /// Scans Cursor usage via the CSV export API (tokscale approach).
 /// Reads `cursorAuth/accessToken` from `globalStorage/state.vscdb`, sends it
@@ -12,11 +13,13 @@ public struct CursorScanner: UsageScanner {
     private let stateDBPath: String
     private let csvCachePath: String
     private let tokscaleCachePath: String
+    private let chromeCookiesPath: String
 
     public init(cursorStorage: String = NSHomeDirectory() + "/Library/Application Support/Cursor/User/globalStorage") {
         self.stateDBPath = cursorStorage + "/state.vscdb"
         self.csvCachePath = NSHomeDirectory() + "/.codeisland/cursor-usage.csv"
         self.tokscaleCachePath = NSHomeDirectory() + "/.config/tokscale/cursor-cache/usage.csv"
+        self.chromeCookiesPath = NSHomeDirectory() + "/Library/Application Support/Google/Chrome/Default/Cookies"
     }
 
     public func scan(
@@ -26,13 +29,47 @@ public struct CursorScanner: UsageScanner {
     ) -> Set<String> {
         var activeFiles = Set<String>()
         let cacheKey = "cursor-csv"
-
-        guard let token = readCursorSessionToken(dbPath: stateDBPath) else {
-            usageLogger.notice("Cursor: no session token found")
+        // Fast path: use cached CSV if available and recent (< 1 hour old).
+        if let attrs = try? fm.attributesOfItem(atPath: csvCachePath),
+           let mtime = attrs[.modificationDate] as? Date,
+           Date().timeIntervalSince(mtime) < 3600,
+           let cached = try? String(contentsOfFile: csvCachePath, encoding: .utf8),
+           !cached.hasPrefix("<") {
+            usageLogger.notice("Cursor: using recent cached CSV")
+            var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
+            entry.source = sourceName
+            entry.entries = parseCursorUsageCSV(text: cached)
+            entry.entries.removeAll { $0.timestamp < cutoff }
+            cache.files[cacheKey] = entry
+            activeFiles.insert(cacheKey)
+            usageLogger.notice("Cursor: \(entry.entries.count) entries in window")
             return activeFiles
         }
-        usageLogger.notice("Cursor: found session token (len=\(token.count))")
 
+        // Try Chrome cookie (like spinnaker-mcp/pycookiecheat), then IDE token.
+        var sessionToken: String?
+        if let chromeToken = readChromeCursorSessionToken() {
+            usageLogger.notice("Cursor: extracted WorkosCursorSessionToken from Chrome (len=\(chromeToken.count))")
+            sessionToken = chromeToken
+        }
+        if sessionToken == nil, let ideToken = readCursorSessionToken(dbPath: stateDBPath) {
+            usageLogger.notice("Cursor: using IDE session token (len=\(ideToken.count))")
+            sessionToken = ideToken
+        }
+        guard let token = sessionToken else {
+            // Last resort: try any old cached CSV or tokscale cache.
+            if let cached = try? String(contentsOfFile: csvCachePath, encoding: .utf8), !cached.hasPrefix("<") {
+                usageLogger.notice("Cursor: using stale cached CSV (no token)")
+                var entry = cache.files[cacheKey] ?? UsageFileCache.FileEntry()
+                entry.source = sourceName
+                entry.entries = parseCursorUsageCSV(text: cached)
+                entry.entries.removeAll { $0.timestamp < cutoff }
+                cache.files[cacheKey] = entry
+                activeFiles.insert(cacheKey)
+                usageLogger.notice("Cursor: \(entry.entries.count) entries in window")
+            }
+            return activeFiles
+        }
         // Try to fetch fresh CSV; fall back to cache.
         var csvText: String?
         if let fresh = fetchCursorUsageCSV(token: token), !fresh.hasPrefix("<") {
@@ -235,5 +272,141 @@ public struct CursorScanner: UsageScanner {
         // The CSV export is the only source of per-event token counts.
         usageLogger.notice("Cursor: gRPC response \(data.count) bytes, proto \(length) bytes")
         return nil
+    }
+
+    // MARK: - Chrome cookie extraction
+
+    /// Extract the `WorkosCursorSessionToken` cookie from Chrome's cookie DB.
+    /// Uses the same technique as `pycookiecheat` / spinnaker-mcp:
+    ///   1. Read the AES key from macOS Keychain (service "Chrome Safe Storage")
+   ///   2. Derive a 16-byte key via PBKDF2 (password=key, salt="saltysalt", 1003 rounds)
+    ///   3. Decrypt the cookie value from Chrome's SQLite Cookies DB (AES-128-CBC, IV=16*" ")
+    ///   4. Strip the v10 prefix and PKCS7 padding
+    /// Requires Chrome to have been logged into cursor.com.
+    private func readChromeCursorSessionToken() -> String? {
+        guard FileManager.default.fileExists(atPath: chromeCookiesPath) else { return nil }
+
+        // Step 1: Read the Chrome Safe Storage key from Keychain.
+        guard let chromeKey = readChromeSafeStorageKey() else {
+            usageLogger.notice("Cursor: could not read Chrome Safe Storage key from Keychain")
+            return nil
+        }
+
+        // Step 2: Derive AES key via PBKDF2.
+        let derivedKey = deriveChromeAESKey(password: chromeKey)
+
+        // Step 3: Read the encrypted cookie value from Chrome's SQLite DB.
+        guard let encryptedValue = readEncryptedCookieValue() else {
+            usageLogger.notice("Cursor: no WorkosCursorSessionToken in Chrome cookies")
+            return nil
+        }
+
+        // Step 4: Decrypt the cookie value.
+        // Chrome cookie encryption format: "v10" prefix + AES-128-CBC ciphertext, IV = 16 space bytes.
+        guard encryptedValue.count > 3,
+              encryptedValue.prefix(3) == Data("v10".utf8) else { return nil }
+        let ciphertext = encryptedValue.subdata(in: 3..<encryptedValue.count)
+        let iv = Data(repeating: 0x20, count: 16) // 16 space chars
+
+        guard let plaintext = aesDecrypt(ciphertext: ciphertext, key: derivedKey, iv: iv) else {
+            usageLogger.notice("Cursor: AES decryption failed for Chrome cookie")
+            return nil
+        }
+
+        // Strip PKCS7 padding.
+        guard let plaintextStr = String(data: plaintext, encoding: .utf8) else { return nil }
+        return plaintextStr
+    }
+
+    /// Read the Chrome Safe Storage password from the macOS Keychain.
+    private func readChromeSafeStorageKey() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Chrome Safe Storage",
+            kSecAttrAccount as String: "Chrome",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let key = String(data: data, encoding: .utf8) else { return nil }
+        return key
+    }
+
+    /// Derive the 16-byte AES key using PBKDF2-HMAC-SHA1 (Chrome's scheme).
+    private func deriveChromeAESKey(password: String) -> Data {
+        let passwordData = password.data(using: .utf8) ?? Data()
+        let salt = Data("saltysalt".utf8)
+        let derivedKey = self.pbkdf2(password: passwordData, salt: salt, iterations: 1003, keyLength: 16)
+        return derivedKey
+    }
+
+    /// PBKDF2-HMAC-SHA1 key derivation.
+    private func pbkdf2(password: Data, salt: Data, iterations: Int, keyLength: Int) -> Data {
+        var derivedKey = Data(count: keyLength)
+        derivedKey.withUnsafeMutableBytes { derivedKeyBytes in
+            password.withUnsafeBytes { passwordBytes in
+                salt.withUnsafeBytes { saltBytes in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordBytes.baseAddress, password.count,
+                        saltBytes.baseAddress, salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+                        UInt32(iterations),
+                        derivedKeyBytes.baseAddress, keyLength
+                    )
+                }
+            }
+        }
+        return derivedKey
+    }
+
+    /// AES-128-CBC decryption.
+    private func aesDecrypt(ciphertext: Data, key: Data, iv: Data) -> Data? {
+        let bufferSize = ciphertext.count + kCCBlockSizeAES128
+        var buffer = Data(count: bufferSize)
+        var bytesDecrypted = 0
+        let status = buffer.withUnsafeMutableBytes { bufferBytes in
+            ciphertext.withUnsafeBytes { cipherBytes in
+                key.withUnsafeBytes { keyBytes in
+                    iv.withUnsafeBytes { ivBytes in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmAES128),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyBytes.baseAddress, key.count,
+                            ivBytes.baseAddress,
+                            cipherBytes.baseAddress, ciphertext.count,
+                            bufferBytes.baseAddress, bufferSize,
+                            &bytesDecrypted
+                        )
+                    }
+                }
+            }
+        }
+        guard status == kCCSuccess else { return nil }
+        return buffer.prefix(bytesDecrypted)
+    }
+
+    /// Read the encrypted WorkosCursorSessionToken cookie value from Chrome's Cookies SQLite DB.
+    private func readEncryptedCookieValue() -> Data? {
+        var db: OpaquePointer?
+        guard sqlite3_open(chromeCookiesPath, &db) == SQLITE_OK else {
+            sqlite3_close(db)
+            return nil
+        }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT encrypted_value FROM cookies WHERE name = 'WorkosCursorSessionToken' AND host_key LIKE '%cursor.com%' LIMIT 1", -1, &stmt, nil) == SQLITE_OK else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let blob = sqlite3_column_blob(stmt, 0)
+        let length = sqlite3_column_bytes(stmt, 0)
+        guard let blob, length > 0 else { return nil }
+        return Data(bytes: blob, count: Int(length))
     }
 }
