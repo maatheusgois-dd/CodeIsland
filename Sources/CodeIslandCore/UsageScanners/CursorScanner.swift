@@ -251,7 +251,7 @@ public struct CursorScanner: UsageScanner {
 
     private func fetchCursorUsageCSV(token: String) -> String? {
         let url = URL(string: "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens")!
-        var request = URLRequest(url: url, timeoutInterval: 10)
+        var request = URLRequest(url: url, timeoutInterval: 60)
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         request.setValue("https://www.cursor.com/settings", forHTTPHeaderField: "Referer")
@@ -275,7 +275,7 @@ public struct CursorScanner: UsageScanner {
             }
             semaphore.signal()
         }.resume()
-        _ = semaphore.wait(timeout: .now() + 10)
+        _ = semaphore.wait(timeout: .now() + 60)
         return result
     }
 
