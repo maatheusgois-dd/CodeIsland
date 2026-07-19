@@ -2428,13 +2428,26 @@ private struct UsagePage: View {
                     // Today and 5h breakdown
                     UsageBreakdownCard(last5h: usage.last5h, today: usage.today)
 
-                    // Hourly sparkline (last 12h)
+                    // Hourly sparkline (last 12h) with hour labels
                     if !usage.hourlyOutputTokens.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Last 12 Hours (Output Tokens)")
                                 .font(.headline)
-                            UsageSparklineLarge(buckets: usage.hourlyOutputTokens)
-                                .frame(maxWidth: .infinity)
+                            VStack(spacing: 4) {
+                                UsageSparklineLarge(buckets: usage.hourlyOutputTokens)
+                                    .frame(maxWidth: .infinity)
+
+                                // Hour labels under the chart
+                                HStack(spacing: 0) {
+                                    ForEach(0..<usage.hourlyOutputTokens.count, id: \.self) { i in
+                                        let hour = Calendar.current.component(.hour, from: Date().addingTimeInterval(-Double(usage.hourlyOutputTokens.count - 1 - i) * 3600))
+                                        Text(String(format: "%d", hour))
+                                            .font(.system(size: 8, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                            .frame(maxWidth: .infinity)
+                                    }
+                                }
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding()
@@ -2469,6 +2482,7 @@ private struct CursorSetupCard: View {
     @State private var showConsoleScript = false
     @State private var showManualEntry = false
     @State private var manualCSV = ""
+    @State private var showConfirmDelete = false
     weak var appState: AppState?
 
     private let scanner = CursorScanner()
@@ -2479,25 +2493,24 @@ private struct CursorSetupCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "cursorarrow.rays")
-                    .font(.headline)
-                    .foregroundStyle(.purple)
-                Text("Cursor Usage Setup")
-                    .font(.headline)
-                Spacer()
-                if scanner.hasCachedCSV {
-                    Text("CSV Cached")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                } else {
-                    Text("No CSV")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    CursorView(status: .idle, size: 22)
+                        .frame(width: 22, height: 22)
+                    Text("Cursor Usage Setup")
+                        .font(.headline)
+                    Spacer()
+                    if scanner.hasCachedCSV {
+                        Text("CSV Cached")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else {
+                        Text("No CSV")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            }
 
-            Text("Cursor doesn't store token counts locally. CodeIsland extracts them from the CSV export API using your Chrome session cookie — the same technique as spinnaker-mcp.")
+            Text("Cursor doesn't store token counts locally. CodeIsland reads them from your Chrome session cookie and the Cursor CSV export API. All data stays on your Mac — nothing is shared, sent to servers, or included in telemetry.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -2544,6 +2557,31 @@ private struct CursorSetupCard: View {
                         Text("Paste CSV")
                     }
                 }
+
+                // Destructive: remove cached CSV
+                if scanner.hasCachedCSV {
+                    Button(role: .destructive) {
+                        showConfirmDelete = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash")
+                            Text("Remove CSV")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .confirmationDialog("Remove cached Cursor CSV?",
+                        isPresented: $showConfirmDelete,
+                        titleVisibility: .visible) {
+                        Button("Remove", role: .destructive) {
+                            try? FileManager.default.removeItem(atPath: scanner.csvCachePath)
+                            refreshResult = "CSV removed"
+                            appState?.scanClaudeUsage()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This deletes the cached Cursor usage CSV. You'll need to extract or paste it again to see Cursor data in the breakdown.")
+                    }
+                }
             }
             .buttonStyle(.bordered)
 
@@ -2575,9 +2613,8 @@ private struct CursorSetupCard: View {
                     }
                     Text("2. Open browser DevTools (⌥⌘J)")
                     Text("3. Paste this in the console:")
-                        .font(.caption.monospaced())
+                    Text("(async()=>{const r=await fetch('/api/dashboard/export-usage-events-csv?strategy=tokens');const t=await r.text();console.log(t.substring(0,200)+'...\\n\\nLength: '+t.length);await navigator.clipboard.writeText(t);console.log('CSV copied to clipboard. Save to ~/.codeisland/cursor-usage.csv');})();")
 
-                    Text("fetch('/api/dashboard/export-usage-events-csv?strategy=tokens').then(r=>r.text()).then(t=>console.log(t.substring(0,200)+'...\\n\\nFull CSV copied to clipboard. Length: '+t.length+'\\n\\nSave to ~/.codeisland/cursor-usage.csv')||navigator.clipboard.writeText(t))")
                         .font(.system(size: 10, design: .monospaced))
                         .textSelection(.enabled)
                         .padding(8)

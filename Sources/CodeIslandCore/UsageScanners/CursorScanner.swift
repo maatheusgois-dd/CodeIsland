@@ -11,7 +11,7 @@ import CommonCrypto
 public struct CursorScanner: UsageScanner {
     public let sourceName = "Cursor"
     private let stateDBPath: String
-    private let csvCachePath: String
+    public let csvCachePath: String
     private let tokscaleCachePath: String
     private let chromeCookiesPath: String
 
