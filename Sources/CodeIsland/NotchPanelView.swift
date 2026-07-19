@@ -1020,6 +1020,36 @@ private struct ApprovalBar: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            // Which CLI is asking — show source name at the top so the user
+            // knows who the permission request is from.
+            if let session = session {
+                HStack(spacing: 5) {
+                    if let icon = cliIcon(source: session.source, size: 12) {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .frame(width: 12, height: 12)
+                    }
+                    Text(session.sourceLabel)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.85))
+                    if let cwd = session.cwd {
+                        Text("·")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.4))
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.white.opacity(0.5))
+                        Text((cwd as NSString).lastPathComponent)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.55))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+            }
+
             // Tool name + file context
             HStack(spacing: 6) {
                 Text("!")
