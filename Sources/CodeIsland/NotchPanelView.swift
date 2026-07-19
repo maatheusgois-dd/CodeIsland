@@ -1876,7 +1876,7 @@ private struct SessionListView: View {
             // Compact one-line usage footer (5h / today + sparkline).
             if showUsageStats, onlySessionId == nil, let usage = appState.claudeUsage,
                !(usage.last5h.isEmpty && usage.today.isEmpty) {
-                UsageFooterLine(usage: usage)
+                UsageFooterLine(usage: usage, appState: appState)
             }
         }
         .onChange(of: appState.renamingSessionId) { _, newValue in
@@ -1893,6 +1893,7 @@ private struct SessionListView: View {
 /// (input + cache writes); cache reads live in the tooltip.
 private struct UsageFooterLine: View {
     let usage: ClaudeUsageScanner.Snapshot
+    var appState: AppState?
     @ObservedObject private var l10n = L10n.shared
 
     var body: some View {
@@ -1913,8 +1914,8 @@ private struct UsageFooterLine: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
         .help(detail)
-        .contentShape(Rectangle())
         .onTapGesture {
+            appState?.surface = .collapsed
             SettingsWindowController.shared.show(page: .usage)
         }
     }
