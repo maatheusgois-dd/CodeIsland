@@ -43,4 +43,26 @@ public enum ClaudeUsageScanner {
     public static func formatTokens(_ count: Int) -> String {
         CodeIslandCore.formatTokens(count)
     }
+
+    /// Parse one Claude Code transcript line into (timestamp, message id, usage).
+    /// Exposed for tests; mirrors `ClaudeCodeScanner.parseLine`.
+    static func parseAssistantUsage(_ line: String) -> (timestamp: Date, messageId: String, usage: ClaudeUsageTotals)? {
+        guard line.contains("\"assistant\""), line.contains("\"usage\"") else { return nil }
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["type"] as? String == "assistant",
+              let timestampRaw = obj["timestamp"] as? String,
+              let timestamp = parseISO8601(timestampRaw),
+              let message = obj["message"] as? [String: Any],
+              let messageId = message["id"] as? String,
+              let usage = message["usage"] as? [String: Any]
+        else { return nil }
+        var totals = ClaudeUsageTotals()
+        totals.inputTokens = usage["input_tokens"] as? Int ?? 0
+        totals.outputTokens = usage["output_tokens"] as? Int ?? 0
+        totals.cacheCreationTokens = usage["cache_creation_input_tokens"] as? Int ?? 0
+        totals.cacheReadTokens = usage["cache_read_input_tokens"] as? Int ?? 0
+        totals.messageCount = 1
+        return (timestamp, messageId, totals)
+    }
 }
