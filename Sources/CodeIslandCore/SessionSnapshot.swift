@@ -510,7 +510,12 @@ public struct SessionSnapshot: Sendable {
     }
 
     /// Source label for display
-    public var sourceLabel: String {
+    public var sourceLabel: String { Self.sourceLabel(for: source) }
+
+    /// Static source-label lookup so callers with only a source string (e.g.
+    /// the approval card when the session was removed) can still render the
+    /// CLI identity without a live `SessionSnapshot`.
+    public static func sourceLabel(for source: String) -> String {
         switch source {
         case "claude": return "Claude"
         case "codex": return "Codex"
@@ -540,7 +545,7 @@ public struct SessionSnapshot: Sendable {
         case "cline": return "Cline"
         case "zcode": return "ZCode"
         default:
-            if let customName = Self.loadCustomSourceNames()[source] {
+            if let customName = loadCustomSourceNames()[source] {
                 return customName
             }
             return source.capitalized

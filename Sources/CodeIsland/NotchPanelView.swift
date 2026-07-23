@@ -213,6 +213,7 @@ struct NotchPanelView: View {
                                 queueTotal: appState.permissionQueue.count,
                                 session: session,
                                 sessionId: sid,
+                                eventSource: pending.event.rawJSON["_source"] as? String,
                                 appState: appState,
                                 onAllow: { appState.approvePermission(always: false) },
                                 onAlwaysAllow: { appState.approvePermission(always: true) },
@@ -997,6 +998,7 @@ private struct ApprovalBar: View {
     let queueTotal: Int
     let session: SessionSnapshot?
     let sessionId: String
+    let eventSource: String?
     let appState: AppState
     let onAllow: () -> Void
     let onAlwaysAllow: () -> Void
@@ -1021,70 +1023,197 @@ private struct ApprovalBar: View {
         toolInput?["server_name"] as? String
     }
 
+    /// Resolved source for the no-session fallback: the event's `_source`
+    /// (normalized) so we can still show *which CLI is asking* even when the
+    /// session was removed while the card is still visible.
+    private var resolvedSource: String? {
+        SessionSnapshot.normalizedSupportedSource(eventSource)
+    }
+
+    /// Brand color for the CLI identity header — derived from the session's
+    /// status (matches SessionCard.statusNameColor for visual continuity
+    /// between the session list and the approval card).
+    private var headerColor: Color {
+        guard let session else {
+            // No session — still an approval context, so use the approval
+            // accent color for any CLI-identity text we render.
+            return Color(red: 1.0, green: 0.6, blue: 0.2)
+        }
+        if session.status == .idle && session.interrupted {
+            return Color(red: 1.0, green: 0.45, blue: 0.35)
+        }
+        switch session.status {
+        case .processing, .running:              return Color(red: 0.3, green: 0.85, blue: 0.4)
+        case .waitingApproval, .waitingQuestion:  return Color(red: 1.0, green: 0.6, blue: 0.2)
+        case .idle:                               return .white
+        }
+    }
     var body: some View {
         VStack(spacing: 8) {
-            // Which CLI is asking — show source name at the top so the user
-            // knows who the permission request is from.
+            // Prominent header: which CLI is asking. Mirrors SessionCard's
+            // SessionIdentityLine — custom name (if set) or project name, the
+            // source label, and the short session id in the source brand
+            // color. The "! Bash" tool line moves to a secondary detail row.
             if let session = session {
                 HStack(spacing: 5) {
-                    if let icon = cliIcon(source: session.source, size: 12) {
+                    if let icon = cliIcon(source: session.source, size: 14) {
                         Image(nsImage: icon)
                             .resizable()
-                            .frame(width: 12, height: 12)
+                            .frame(width: 14, height: 14)
                     }
+                    Text(appState.customDisplayName(for: sessionId) ?? session.projectDisplayName)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(headerColor)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("·")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.35))
                     Text(session.sourceLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(headerColor.opacity(0.85))
+                    Text("#\(session.displaySessionId(sessionId: sessionId))")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(headerColor.opacity(0.7))
+                    Spacer(minLength: 4)
+                    if queueTotal > 1 {
+                        Text("\(queuePosition)/\(queueTotal)")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                }
+                .padding(.horizontal, 14)
+                .contentShape(Rectangle())
+                .onTapGesture { handleCardClick() }
+
+                // Secondary row: the tool being approved ("! Bash", "! apply_patch", …).
+                // Demoted from the header — the CLI identity is now what the
+                // user sees at a glance; the tool is the context.
+                HStack(spacing: 6) {
+                    Text("!")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.85))
-                    if let cwd = session.cwd {
+                        .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                    Text(tool)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                    if let server = serverName {
+                        Text("(\(server))")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color(red: 0.6, green: 0.7, blue: 0.9))
+                    }
+                    if let name = fileName {
                         Text("·")
                             .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.4))
-                        Image(systemName: "folder.fill")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.white.opacity(0.5))
-                        Text((cwd as NSString).lastPathComponent)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.55))
+                            .foregroundStyle(.white.opacity(0.35))
+                        Text(name)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.6))
                             .lineLimit(1)
-                            .truncationMode(.tail)
+                            .truncationMode(.middle)
                     }
                     Spacer()
                 }
                 .padding(.horizontal, 14)
-            }
+                .contentShape(Rectangle())
+                .onTapGesture { handleCardClick() }
+            } else {
+                // No session (transient/removed) — still show which CLI is
+                // asking when the event carries `_source`, so the user isn't
+                // left guessing. Falls back to the tool-only header otherwise.
+                if let src = resolvedSource {
+                    // Header row: CLI icon + source label (which CLI is asking).
+                    HStack(spacing: 5) {
+                        if let icon = cliIcon(source: src, size: 14) {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .frame(width: 14, height: 14)
+                        }
+                        Text(SessionSnapshot.sourceLabel(for: src))
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(headerColor)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        if queueTotal > 1 {
+                            Text("\(queuePosition)/\(queueTotal)")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.6))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.white.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .contentShape(Rectangle())
+                    .onTapGesture { handleCardClick() }
 
-            // Tool name + file context
-            HStack(spacing: 6) {
-                Text("!")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
-                Text(tool)
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
-                if let server = serverName {
-                    Text("(\(server))")
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color(red: 0.6, green: 0.7, blue: 0.9))
+                    // Secondary row: the tool being approved.
+                    HStack(spacing: 6) {
+                        Text("!")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                        Text(tool)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                        if let server = serverName {
+                            Text("(\(server))")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color(red: 0.6, green: 0.7, blue: 0.9))
+                        }
+                        if let name = fileName {
+                            Text("·")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.white.opacity(0.35))
+                            Text(name)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.6))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .contentShape(Rectangle())
+                    .onTapGesture { handleCardClick() }
+                } else {
+                    // No source either — keep the original tool-only header.
+                    HStack(spacing: 6) {
+                        Text("!")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                        Text(tool)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
+                        if let server = serverName {
+                            Text("(\(server))")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color(red: 0.6, green: 0.7, blue: 0.9))
+                        }
+                        if let name = fileName {
+                            Text(name)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        if queueTotal > 1 {
+                            Text("\(queuePosition)/\(queueTotal)")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.white.opacity(0.1))
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .contentShape(Rectangle())
+                    .onTapGesture { handleCardClick() }
                 }
-                if let name = fileName {
-                    Text(name)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-                if queueTotal > 1 {
-                    Text("\(queuePosition)/\(queueTotal)")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Color.white.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                }
-                Spacer()
             }
-            .padding(.horizontal, 14)
-            .contentShape(Rectangle())
-            .onTapGesture { handleCardClick() }
 
             // Tool-specific detail view
             if toolInput != nil {
