@@ -16,7 +16,7 @@ public enum ClaudeUsageScanner {
     public typealias SourceTotals = CodeIslandCore.SourceTotals
 
     public static func scan(
-        claudeHome: String = NSHomeDirectory() + "/.claude",
+        claudeHome: String = ClaudeConfigPaths.configDir(),
         ompHome: String = NSHomeDirectory() + "/.omp",
         codexHome: String = NSHomeDirectory() + "/.codex",
         cursorStorage: String = NSHomeDirectory() + "/Library/Application Support/Cursor/User/globalStorage",
@@ -28,7 +28,7 @@ public enum ClaudeUsageScanner {
     }
 
     public static func scan(
-        claudeHome: String = NSHomeDirectory() + "/.claude",
+        claudeHome: String = ClaudeConfigPaths.configDir(),
         ompHome: String = NSHomeDirectory() + "/.omp",
         codexHome: String = NSHomeDirectory() + "/.codex",
         cursorStorage: String = NSHomeDirectory() + "/Library/Application Support/Cursor/User/globalStorage",

@@ -126,7 +126,7 @@ final class L10n: ObservableObject {
         "tool_history_limit": "Tool History Limit",
         "tool_history_limit_desc": "Max number of recent tool calls shown per session",
         "plugin_session_mode": "Agent Sub-Sessions",
-        "plugin_session_mode_desc": "How to show child sessions spawned by agents, including Codex subagents and plugin hook events (e.g. omo in OpenCode)",
+        "plugin_session_mode_desc": "How to show child sessions spawned by agents, including Codex subagents, Cursor IDE Task/subagents, and plugin hook events (e.g. omo in OpenCode)",
         "plugin_session_mode_separate": "Show separately",
         "plugin_session_mode_merge": "Merge into main",
         "plugin_session_mode_hide": "Hide",
@@ -149,6 +149,10 @@ final class L10n: ObservableObject {
         "excluded_hook_cwd_title": "Ignore Hooks From Paths",
         "excluded_hook_cwd_desc": "Comma-separated substrings. Any hook event whose working directory contains one of them is silently dropped — useful for filtering out background plugins like claude-mem. Example: .claude-mem,.cache/agents",
         "excluded_hook_cwd_placeholder": "e.g. .claude-mem,.cache/agents",
+        "claude_config_dir_title": "Claude Code Config Directory",
+        "claude_config_dir_desc": "Where Claude Code keeps projects/ and settings.json. Leave empty to auto-detect ($CLAUDE_CONFIG_DIR, then whichever of ~/.claude or ~/.config/claude-code actually holds your projects, preferring ~/.claude). Set this if you use a custom CLAUDE_CONFIG_DIR — a Finder-launched app does not inherit your shell environment. Restart CodeIsland after changing.",
+        "claude_config_dir_placeholder": "auto-detect",
+        "claude_config_dir_resolved": "Currently using: %@",
 
         // Webhook forwarding
         "webhook_title": "Webhook Forwarding",
@@ -164,7 +168,7 @@ final class L10n: ObservableObject {
         "max_visible_sessions": "Max Visible Sessions",
         "max_visible_sessions_desc": "Sessions beyond this limit will be scrollable",
         "collapsed_width_scale": "Island Width",
-        "collapsed_width_scale_desc": "Scale the collapsed island width on non-notch displays",
+        "collapsed_width_scale_desc": "Scale the collapsed island width — on notched displays it can widen beyond the notch, never narrower",
         "notch_height_mode": "Top Bar Height",
         "notch_height_mode_desc": "Align the panel to the real notch height, menu bar height, or a custom value",
         "notch_height_match_notch": "Match Notch Height",
@@ -371,6 +375,9 @@ final class L10n: ObservableObject {
         "open_path": "Open",
         "copy_session_id": "Copy session ID",
 
+        // Cursor external question wait (#265)
+        "cursor_question_answer_hint": "Answer in Cursor to continue",
+
         // Session grouping
         "status_running": "Running",
         "status_waiting": "Waiting",
@@ -466,7 +473,7 @@ final class L10n: ObservableObject {
         "tool_history_limit": "Tool-Verlaufslimit",
         "tool_history_limit_desc": "Maximale Anzahl der zuletzt angezeigten Tool-Aufrufe pro Sitzung",
         "plugin_session_mode": "Agent-Sub-Sitzungen",
-        "plugin_session_mode_desc": "Darstellung von durch Agenten gestarteten Kind-Sitzungen, einschließlich Codex-Subagenten und Plugin-Hook-Ereignissen (z. B. omo in OpenCode)",
+        "plugin_session_mode_desc": "Darstellung von durch Agenten gestarteten Kind-Sitzungen, einschließlich Codex-Subagenten, Cursor-IDE-Task/Subagenten und Plugin-Hook-Ereignissen (z. B. omo in OpenCode)",
         "plugin_session_mode_separate": "Separat anzeigen",
         "plugin_session_mode_merge": "In Hauptsitzung zusammenführen",
         "plugin_session_mode_hide": "Ausblenden",
@@ -504,7 +511,7 @@ final class L10n: ObservableObject {
         "max_visible_sessions": "Maximal sichtbare Sitzungen",
         "max_visible_sessions_desc": "Sitzungen über diesem Limit werden scrollbar",
         "collapsed_width_scale": "Island-Breite",
-        "collapsed_width_scale_desc": "Breite der eingeklappten Island auf Displays ohne Notch skalieren",
+        "collapsed_width_scale_desc": "Breite der eingeklappten Island skalieren — auf Displays mit Notch nur breiter als die Notch, nie schmaler",
         "notch_height_mode": "Höhe der oberen Leiste",
         "notch_height_mode_desc": "Panel an der echten Notch-Höhe, der Menüleistenhöhe oder einem eigenen Wert ausrichten",
         "notch_height_match_notch": "An Notch-Höhe anpassen",
@@ -711,6 +718,9 @@ final class L10n: ObservableObject {
         "open_path": "Öffnen",
         "copy_session_id": "Sitzungs-ID kopieren",
 
+        // Cursor external question wait (#265)
+        "cursor_question_answer_hint": "Zum Fortfahren in Cursor antworten",
+
         // Session grouping
         "status_running": "Läuft",
         "status_waiting": "Wartet",
@@ -806,7 +816,7 @@ final class L10n: ObservableObject {
         "tool_history_limit": "工具历史上限",
         "tool_history_limit_desc": "每个会话显示的最近工具调用数量上限",
         "plugin_session_mode": "Agent 子会话",
-        "plugin_session_mode_desc": "处理由 agent 派生的子会话，包括 Codex subagent 和插件 hook 事件（例如 OpenCode 中的 omo）",
+        "plugin_session_mode_desc": "处理由 agent 派生的子会话，包括 Codex subagent、Cursor IDE Task/subagent 和插件 hook 事件（例如 OpenCode 中的 omo）",
         "plugin_session_mode_separate": "独立显示",
         "plugin_session_mode_merge": "合并到主会话",
         "plugin_session_mode_hide": "隐藏",
@@ -829,6 +839,10 @@ final class L10n: ObservableObject {
         "excluded_hook_cwd_title": "忽略指定路径的 Hook",
         "excluded_hook_cwd_desc": "用逗号分隔的子串。任何 hook 事件的工作目录如果包含其中之一就会被静默丢弃 —— 适合过滤 claude-mem 等后台插件。示例：.claude-mem,.cache/agents",
         "excluded_hook_cwd_placeholder": "例如 .claude-mem,.cache/agents",
+        "claude_config_dir_title": "Claude Code 配置目录",
+        "claude_config_dir_desc": "Claude Code 存放 projects/ 和 settings.json 的位置。留空则自动检测（先 $CLAUDE_CONFIG_DIR，再是确实包含 projects/ 的 ~/.claude，最后 ~/.config/claude-code）。如果你使用自定义的 CLAUDE_CONFIG_DIR，请在此设置——从访达启动的应用不会继承 shell 环境变量。修改后请重启 CodeIsland。",
+        "claude_config_dir_placeholder": "自动检测",
+        "claude_config_dir_resolved": "当前使用：%@",
 
         // Webhook 转发
         "webhook_title": "Webhook 转发",
@@ -844,7 +858,7 @@ final class L10n: ObservableObject {
         "max_visible_sessions": "最大显示会话数",
         "max_visible_sessions_desc": "超出数量的会话将通过滚动查看",
         "collapsed_width_scale": "灵动岛宽度",
-        "collapsed_width_scale_desc": "仅调整无刘海显示器上的收起宽度",
+        "collapsed_width_scale_desc": "调整收起状态的宽度；有刘海的屏幕上只能比刘海更宽，不会更窄",
         "notch_height_mode": "顶部高度对齐",
         "notch_height_mode_desc": "让面板与真实 notch 高度、菜单栏高度或自定义值对齐",
         "notch_height_match_notch": "对齐 notch 高度",
@@ -1051,6 +1065,9 @@ final class L10n: ObservableObject {
         "open_path": "打开",
         "copy_session_id": "复制会话 ID",
 
+        // Cursor external question wait (#265)
+        "cursor_question_answer_hint": "请在 Cursor 中回答后继续",
+
         // Session grouping
         "status_running": "运行中",
         "status_waiting": "等待中",
@@ -1146,7 +1163,7 @@ final class L10n: ObservableObject {
         "tool_history_limit": "工具歷史上限",
         "tool_history_limit_desc": "每個會話顯示的最近工具呼叫數量上限",
         "plugin_session_mode": "Agent 子會話",
-        "plugin_session_mode_desc": "處理由 agent 衍生的子會話，包括 Codex subagent 和外掛 hook 事件（例如 OpenCode 中的 omo）",
+        "plugin_session_mode_desc": "處理由 agent 衍生的子會話，包括 Codex subagent、Cursor IDE Task/subagent 和外掛 hook 事件（例如 OpenCode 中的 omo）",
         "plugin_session_mode_separate": "獨立顯示",
         "plugin_session_mode_merge": "合併到主會話",
         "plugin_session_mode_hide": "隱藏",
@@ -1169,6 +1186,10 @@ final class L10n: ObservableObject {
         "excluded_hook_cwd_title": "忽略指定路徑的 Hook",
         "excluded_hook_cwd_desc": "以逗號分隔的子字串。任何 hook 事件的工作目錄如果包含其中之一就會被靜默丟棄 —— 適合過濾 claude-mem 等背景外掛。範例：.claude-mem,.cache/agents",
         "excluded_hook_cwd_placeholder": "例如 .claude-mem,.cache/agents",
+        "claude_config_dir_title": "Claude Code 設定目錄",
+        "claude_config_dir_desc": "Claude Code 存放 projects/ 和 settings.json 的位置。留空則自動偵測（先 $CLAUDE_CONFIG_DIR，再是確實包含 projects/ 的 ~/.claude，最後 ~/.config/claude-code）。若你使用自訂的 CLAUDE_CONFIG_DIR，請在此設定——從 Finder 啟動的應用程式不會繼承 shell 環境變數。修改後請重新啟動 CodeIsland。",
+        "claude_config_dir_placeholder": "自動偵測",
+        "claude_config_dir_resolved": "目前使用：%@",
 
         // Webhook 轉發
         "webhook_title": "Webhook 轉發",
@@ -1184,7 +1205,7 @@ final class L10n: ObservableObject {
         "max_visible_sessions": "最大顯示會話數",
         "max_visible_sessions_desc": "超出數量的會話將透過捲動檢視",
         "collapsed_width_scale": "靈動島寬度",
-        "collapsed_width_scale_desc": "僅調整無瀏海顯示器上的收合寬度",
+        "collapsed_width_scale_desc": "調整收合狀態的寬度；有瀏海的螢幕上只能比瀏海更寬，不會更窄",
         "notch_height_mode": "頂部高度對齊",
         "notch_height_mode_desc": "讓面板與真實 notch 高度、選單列高度或自訂值對齊",
         "notch_height_match_notch": "對齊 notch 高度",
@@ -1391,6 +1412,9 @@ final class L10n: ObservableObject {
         "open_path": "開啟",
         "copy_session_id": "複製會話 ID",
 
+        // Cursor external question wait (#265)
+        "cursor_question_answer_hint": "請在 Cursor 中回答後繼續",
+
         // Session grouping
         "status_running": "執行中",
         "status_waiting": "等待中",
@@ -1486,7 +1510,7 @@ final class L10n: ObservableObject {
         "tool_history_limit": "ツール履歴の上限",
         "tool_history_limit_desc": "セッションごとに表示する最近のツール呼び出し数の上限です",
         "plugin_session_mode": "エージェントのサブセッション",
-        "plugin_session_mode_desc": "Codex subagent やプラグイン hook イベントなど、エージェントから派生した子セッションの表示方法を選択します（例: OpenCode の omo）",
+        "plugin_session_mode_desc": "Codex subagent、Cursor IDE Task/subagent、プラグイン hook イベントなど、エージェントから派生した子セッションの表示方法を選択します（例: OpenCode の omo）",
         "plugin_session_mode_separate": "別々に表示",
         "plugin_session_mode_merge": "メインセッションに統合",
         "plugin_session_mode_hide": "非表示",
@@ -1509,6 +1533,10 @@ final class L10n: ObservableObject {
         "excluded_hook_cwd_title": "指定パスの Hook を無視",
         "excluded_hook_cwd_desc": "カンマ区切りの部分文字列。作業ディレクトリにいずれかを含む hook イベントは静かに破棄されます。claude-mem 等のバックグラウンドプラグイン除外に便利です。例：.claude-mem,.cache/agents",
         "excluded_hook_cwd_placeholder": "例: .claude-mem,.cache/agents",
+        "claude_config_dir_title": "Claude Code 設定ディレクトリ",
+        "claude_config_dir_desc": "Claude Code が projects/ と settings.json を保存する場所。空欄の場合は自動検出します（$CLAUDE_CONFIG_DIR、次に projects/ が実在する ~/.claude、次に ~/.config/claude-code の順）。カスタムの CLAUDE_CONFIG_DIR を使用している場合は設定してください。Finder から起動したアプリはシェルの環境変数を継承しません。変更後は CodeIsland を再起動してください。",
+        "claude_config_dir_placeholder": "自動検出",
+        "claude_config_dir_resolved": "現在の使用先: %@",
 
         // Webhook 転送
         "webhook_title": "Webhook 転送",
@@ -1524,7 +1552,7 @@ final class L10n: ObservableObject {
         "max_visible_sessions": "最大表示セッション数",
         "max_visible_sessions_desc": "この数を超えるセッションはスクロールして表示します",
         "collapsed_width_scale": "アイランドの幅",
-        "collapsed_width_scale_desc": "ノッチのないディスプレイで折りたたみ時のアイランド幅を調整します",
+        "collapsed_width_scale_desc": "折りたたみ時のアイランド幅を調整します。ノッチ付きディスプレイではノッチより広くのみ設定できます",
         "notch_height_mode": "トップバーの高さ",
         "notch_height_mode_desc": "パネルを実際のノッチの高さ、メニューバーの高さ、またはカスタム値に合わせます",
         "notch_height_match_notch": "ノッチの高さに合わせる",
@@ -1731,6 +1759,9 @@ final class L10n: ObservableObject {
         "open_path": "開く",
         "copy_session_id": "セッション ID をコピー",
 
+        // Cursor external question wait (#265)
+        "cursor_question_answer_hint": "続行するには Cursor で回答してください",
+
         // Session grouping
         "status_running": "実行中",
         "status_waiting": "待機中",
@@ -1826,7 +1857,7 @@ final class L10n: ObservableObject {
         "tool_history_limit": "도구 기록 제한",
         "tool_history_limit_desc": "세션별로 표시할 최근 도구 호출의 최대 개수입니다",
         "plugin_session_mode": "에이전트 하위 세션",
-        "plugin_session_mode_desc": "Codex subagent 및 플러그인 hook 이벤트 등 에이전트가 만든 하위 세션을 표시하는 방식 (예: OpenCode의 omo)",
+        "plugin_session_mode_desc": "Codex subagent, Cursor IDE Task/subagent 및 플러그인 hook 이벤트 등 에이전트가 만든 하위 세션을 표시하는 방식 (예: OpenCode의 omo)",
         "plugin_session_mode_separate": "별도로 표시",
         "plugin_session_mode_merge": "메인 세션으로 병합",
         "plugin_session_mode_hide": "숨김",
@@ -1849,6 +1880,10 @@ final class L10n: ObservableObject {
         "excluded_hook_cwd_title": "지정 경로의 Hook 무시",
         "excluded_hook_cwd_desc": "쉼표로 구분된 부분 문자열. 작업 디렉터리에 하나라도 포함된 hook 이벤트는 조용히 폐기됩니다. claude-mem 같은 백그라운드 플러그인 필터링에 유용합니다. 예: .claude-mem,.cache/agents",
         "excluded_hook_cwd_placeholder": "예: .claude-mem,.cache/agents",
+        "claude_config_dir_title": "Claude Code 설정 디렉터리",
+        "claude_config_dir_desc": "Claude Code가 projects/ 및 settings.json을 저장하는 위치입니다. 비워 두면 자동으로 감지합니다($CLAUDE_CONFIG_DIR, 그다음 projects/가 실제로 있는 ~/.claude, 그다음 ~/.config/claude-code). 사용자 지정 CLAUDE_CONFIG_DIR을 사용하는 경우 설정하세요. Finder에서 실행된 앱은 셸 환경 변수를 상속하지 않습니다. 변경 후 CodeIsland를 다시 시작하세요.",
+        "claude_config_dir_placeholder": "자동 감지",
+        "claude_config_dir_resolved": "현재 사용 중: %@",
 
         // Webhook 전달
         "webhook_title": "Webhook 전달",
@@ -1864,7 +1899,7 @@ final class L10n: ObservableObject {
         "max_visible_sessions": "최대 표시 세션 수",
         "max_visible_sessions_desc": "이 수를 넘는 세션은 스크롤해서 볼 수 있습니다",
         "collapsed_width_scale": "아일랜드 너비",
-        "collapsed_width_scale_desc": "노치가 없는 디스플레이에서 접힌 아일랜드 너비를 조정합니다",
+        "collapsed_width_scale_desc": "접힌 아일랜드 너비를 조정합니다. 노치가 있는 디스플레이에서는 노치보다 넓게만 설정할 수 있습니다",
         "notch_height_mode": "상단 바 높이",
         "notch_height_mode_desc": "패널을 실제 노치 높이, 메뉴 막대 높이 또는 사용자 지정 값에 맞춥니다",
         "notch_height_match_notch": "노치 높이에 맞춤",
@@ -2071,6 +2106,9 @@ final class L10n: ObservableObject {
         "open_path": "열기",
         "copy_session_id": "세션 ID 복사",
 
+        // Cursor external question wait (#265)
+        "cursor_question_answer_hint": "계속하려면 Cursor에서 답변하세요",
+
         // Session grouping
         "status_running": "실행 중",
         "status_waiting": "대기 중",
@@ -2166,7 +2204,7 @@ final class L10n: ObservableObject {
         "tool_history_limit": "Araç Geçmişi Limiti",
         "tool_history_limit_desc": "Oturum başına gösterilen son araç çağrı sayısı",
         "plugin_session_mode": "Ajan Alt Oturumları",
-        "plugin_session_mode_desc": "Codex subagent'ları ve eklenti hook olayları dahil, ajanların başlattığı alt oturumların nasıl gösterileceği (örn: OpenCode içinde omo)",
+        "plugin_session_mode_desc": "Codex subagent'ları, Cursor IDE Task/subagent'ları ve eklenti hook olayları dahil, ajanların başlattığı alt oturumların nasıl gösterileceği (örn: OpenCode içinde omo)",
         "plugin_session_mode_separate": "Ayrı göster",
         "plugin_session_mode_merge": "Ana oturuma birleştir",
         "plugin_session_mode_hide": "Gizle",
@@ -2189,6 +2227,10 @@ final class L10n: ObservableObject {
         "excluded_hook_cwd_title": "Belirli Yolların Hook'larını Yoksay",
         "excluded_hook_cwd_desc": "Virgülle ayrılmış alt dizeler. Çalışma dizini bunlardan birini içeren hook olayları sessizce yok sayılır — claude-mem gibi arka plan eklentilerini filtrelemek için kullanışlı. Örn: .claude-mem,.cache/agents",
         "excluded_hook_cwd_placeholder": "örn. .claude-mem,.cache/agents",
+        "claude_config_dir_title": "Claude Code Yapılandırma Dizini",
+        "claude_config_dir_desc": "Claude Code'un projects/ ve settings.json dosyalarını sakladığı yer. Otomatik algılama için boş bırakın ($CLAUDE_CONFIG_DIR, ardından projects/ klasörünü gerçekten içeren ~/.claude, ardından ~/.config/claude-code). Özel bir CLAUDE_CONFIG_DIR kullanıyorsanız bunu ayarlayın; Finder'dan başlatılan bir uygulama kabuk ortam değişkenlerini devralmaz. Değişiklikten sonra CodeIsland'ı yeniden başlatın.",
+        "claude_config_dir_placeholder": "otomatik algıla",
+        "claude_config_dir_resolved": "Şu anda kullanılan: %@",
 
         // Webhook iletme
         "webhook_title": "Webhook İletme",
@@ -2204,7 +2246,7 @@ final class L10n: ObservableObject {
         "max_visible_sessions": "Maksimum Görünür Oturum",
         "max_visible_sessions_desc": "Bu sınırdan fazla oturumlar kaydırılabilir olacak",
         "collapsed_width_scale": "Ada Genişliği",
-        "collapsed_width_scale_desc": "Çentiksiz ekranlarda daraltılmış ada genişliğini ölçekle",
+        "collapsed_width_scale_desc": "Daraltılmış ada genişliğini ölçekle — çentikli ekranlarda yalnızca çentikten daha geniş olabilir",
         "notch_height_mode": "Üst Çubuk Yüksekliği",
         "notch_height_mode_desc": "Paneli gerçek çentik yüksekliğine, menü çubuğu yüksekliğine veya özel bir değere hizala",
         "notch_height_match_notch": "Çentik Yüksekliğiyle Eşleştir",
@@ -2410,6 +2452,9 @@ final class L10n: ObservableObject {
         "submit": "GÖNDER",
         "open_path": "Aç",
         "copy_session_id": "Oturum ID Kopyala",
+
+        // Cursor external question wait (#265)
+        "cursor_question_answer_hint": "Devam etmek için Cursor'da yanıtlayın",
 
         // Session grouping
         "status_running": "Çalışıyor",

@@ -30,7 +30,8 @@ enum HookFormat {
     case traecli
     /// GitHub Copilot CLI style: [{type, bash, timeoutSec}] with top-level version
     case copilot
-    /// Kimi Code CLI style: TOML [[hooks]] arrays in ~/.kimi/config.toml
+    /// Kimi Code CLI style: TOML [[hooks]] arrays in ~/.kimi-code/config.toml
+    /// (legacy kimi-cli used ~/.kimi/config.toml).
     case kimi
     /// Kiro CLI style: per-agent JSON file at ~/.kiro/agents/<name>.json
     /// with hooks keyed by camelCase event names and `timeout_ms` (#127).
@@ -56,11 +57,13 @@ enum HookFormat {
     case antigravityNamed
     /// ZCode (Z.ai) Electron desktop app — user-level ~/.zcode/cli/config.json
     /// wrapping hooks in `{enabled: Bool, events: {EventName: [{hooks:[{type,
-    /// command}]}]}}`. Event names use a STRICT 7-name schema (SessionStart,
-    /// UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse,
-    /// PostToolUseFailure, Stop) — any other key silently drops the whole
-    /// `hooks` config on load. `hooks.enabled` must be explicit; no hot-reload,
-    /// so edits require a ZCode restart (#245).
+    /// command, timeout?}]}]}}`. Event names use a STRICT 7-name schema
+    /// (SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest,
+    /// PostToolUse, PostToolUseFailure, Stop) — any other key silently drops
+    /// the whole `hooks` config on load. `hooks.enabled` must be explicit; no
+    /// hot-reload, so edits require a ZCode restart (#245). PermissionRequest
+    /// is a blocking approval hook: its stdout decision resolves ZCode's
+    /// permission dialog (#258).
     case zcode
 
     var storageValue: String {
@@ -116,6 +119,8 @@ struct CLIConfig {
     var rootOverride: (@Sendable () -> String)? = nil
     /// Optional override for the user-visible config path (e.g. "$CODEX_HOME/hooks.json").
     var displayPathOverride: (@Sendable () -> String)? = nil
+    /// Optional override for the `--source` value passed to the bridge.
+    var bridgeSourceOverride: String? = nil
 
     var fullPath: String {
         if let override = rootOverride {
@@ -206,13 +211,51 @@ struct ConfigInstaller {
         return raw.isEmpty ? "~/.codex/\(filename)" : "$CODEX_HOME/\(filename)"
     }
 
+    // MARK: - Kimi Code home resolution
+
+    /// Modern Kimi Code CLI data root (`~/.kimi-code`). Prefer this over legacy
+    /// kimi-cli (`~/.kimi`) per https://www.kimi.com/code/docs/kimi-code-cli/guides/migration.html
+    static func kimiCodeHome() -> String { NSHomeDirectory() + "/.kimi-code" }
+
+    /// Legacy kimi-cli data root (`~/.kimi`). Migration leaves this intact.
+    static func kimiLegacyHome() -> String { NSHomeDirectory() + "/.kimi" }
+
+    /// Resolve the Kimi config directory to use for hooks install/status.
+    /// Prefers `~/.kimi-code` when present; falls back to `~/.kimi`; defaults to
+    /// the modern path when neither exists (display / future install target).
+    static func kimiHome(fm: FileManager = .default) -> String {
+        let modern = kimiCodeHome()
+        let legacy = kimiLegacyHome()
+        if fm.fileExists(atPath: modern) { return modern }
+        if fm.fileExists(atPath: legacy) { return legacy }
+        return modern
+    }
+
+    /// Whether any Kimi Code / kimi-cli install footprint is on this machine.
+    static func kimiPresenceDetected(fm: FileManager = .default) -> Bool {
+        let modern = kimiCodeHome()
+        let legacy = kimiLegacyHome()
+        return fm.fileExists(atPath: modern)
+            || fm.fileExists(atPath: legacy)
+            || fm.isExecutableFile(atPath: modern + "/bin/kimi")
+            || fm.fileExists(atPath: modern + "/config.toml")
+            || fm.fileExists(atPath: legacy + "/config.toml")
+    }
+
+    static func displayKimiConfigPath(fm: FileManager = .default) -> String {
+        let home = kimiHome(fm: fm)
+        if home.hasSuffix("/.kimi-code") { return "~/.kimi-code/config.toml" }
+        if home.hasSuffix("/.kimi") { return "~/.kimi/config.toml" }
+        return "~/.kimi-code/config.toml"
+    }
+
     // MARK: - All supported CLIs
 
     private static let builtInCLIs: [CLIConfig] = [
         // Claude Code — uses hook script (with bridge dispatcher + nc fallback)
         CLIConfig(
             name: "Claude Code", source: "claude",
-            configPath: ".claude/settings.json", configKey: "hooks",
+            configPath: "settings.json", configKey: "hooks",
             format: .claude,
             events: [
                 ("UserPromptSubmit", 5, true),
@@ -230,7 +273,9 @@ struct ConfigInstaller {
             ],
             versionedEvents: [
                 "PostToolUseFailure": "2.1.89",
-            ]
+            ],
+            rootOverride: { ClaudeConfigPaths.configDir() },
+            displayPathOverride: { ClaudeConfigPaths.displayPath(ClaudeConfigPaths.settingsPath()) }
         ),
         // Codex — honors $CODEX_HOME (falls back to ~/.codex)
         CLIConfig(
@@ -239,7 +284,7 @@ struct ConfigInstaller {
             format: .nested,
             events: [
                 ("SessionStart", 5, false),
-                ("SessionEnd", 5, true),
+                ("SessionEnd", 3, true),
                 ("UserPromptSubmit", 5, false),
                 ("PreToolUse", 5, false),
                 ("PostToolUse", 5, false),
@@ -306,12 +351,33 @@ struct ConfigInstaller {
             format: .traecli,
             events: defaultEvents(for: .traecli)
         ),
-        // Qoder — Claude Code fork
+        // Trae CLI Next — hooks.json moved under ~/.trae/cli and uses TraeX event names.
+        CLIConfig(
+            name: "Trae CLI Next", source: "traecli-next",
+            configPath: ".trae/cli/hooks.json", configKey: "hooks",
+            format: .nested,
+            events: traecliNextEvents(),
+            bridgeSourceOverride: "traecli"
+        ),
+        // Qoder — Claude Code fork with its own documented PermissionRequest hook.
         CLIConfig(
             name: "Qoder", source: "qoder",
             configPath: ".qoder/settings.json", configKey: "hooks",
             format: .claude,
-            events: defaultEvents(for: .claude)
+            events: [
+                ("UserPromptSubmit", 5, true),
+                ("PreToolUse", 5, false),
+                ("PostToolUse", 5, true),
+                ("PostToolUseFailure", 5, true),
+                ("PermissionRequest", 86400, false),
+                ("Stop", 5, true),
+                ("SubagentStart", 5, true),
+                ("SubagentStop", 5, true),
+                ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
+                ("Notification", 86400, false),
+                ("PreCompact", 5, true),
+            ]
         ),
         // QoderWork — Qoder's standalone desktop assistant app (not the IDE).
         // Claude-format hooks, but user-level ~/.qoderwork/settings.json ONLY
@@ -321,7 +387,20 @@ struct ConfigInstaller {
             name: "QoderWork", source: "qoderwork",
             configPath: ".qoderwork/settings.json", configKey: "hooks",
             format: .claude,
-            events: defaultEvents(for: .claude)
+            events: [
+                ("UserPromptSubmit", 5, true),
+                ("PreToolUse", 5, false),
+                ("PostToolUse", 5, true),
+                ("PostToolUseFailure", 5, true),
+                ("PermissionRequest", 86400, false),
+                ("Stop", 5, true),
+                ("SubagentStart", 5, true),
+                ("SubagentStop", 5, true),
+                ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
+                ("Notification", 86400, false),
+                ("PreCompact", 5, true),
+            ]
         ),
         // Factory — Claude Code fork (uses "droid" as source identifier)
         CLIConfig(
@@ -421,12 +500,15 @@ struct ConfigInstaller {
                 ("errorOccurred", 5, true),
             ]
         ),
-        // Kimi Code CLI — TOML hooks in ~/.kimi/config.toml
+        // Kimi Code CLI — TOML hooks in ~/.kimi-code/config.toml (legacy: ~/.kimi).
+        // See https://www.kimi.com/code/docs/kimi-code-cli/customization/hooks.html
         CLIConfig(
             name: "Kimi Code CLI", source: "kimi",
-            configPath: ".kimi/config.toml", configKey: "hooks",
+            configPath: "config.toml", configKey: "hooks",
             format: .kimi,
-            events: defaultEvents(for: .kimi)
+            events: defaultEvents(for: .kimi),
+            rootOverride: { ConfigInstaller.kimiHome() },
+            displayPathOverride: { ConfigInstaller.displayKimiConfigPath() }
         ),
         // Kiro CLI — agent-scoped JSON at ~/.kiro/agents/codeisland.json.
         // User must launch with `kiro --agent codeisland` for hooks to fire (#127).
@@ -618,19 +700,44 @@ struct ConfigInstaller {
                 ("Stop", 5, false),
             ]
         case .zcode:
-            // ZCode's 7-name schema legally includes PermissionRequest, but its
-            // approve/deny decision-response semantics are unconfirmed — a
-            // long-timeout blocking hook there risks stalling the user's agent.
-            // MVP registers only status-observation events (#245).
+            // All 7 events of ZCode's strict schema, including PermissionRequest.
+            // Its decision contract was confirmed against the shipped agent
+            // kernel (ZCode.app/Contents/Resources/glm/zcode.cjs, #258):
+            // stdout `{hookSpecificOutput: {hookEventName: "PermissionRequest",
+            // decision: {behavior: "allow"|"deny", permissionUpdates?}}}`
+            // resolves the approval; empty stdout, timeout, or schema failure
+            // all fall back to ZCode's own permission dialog. Timeouts are in
+            // seconds; only values above ZCode's 60s per-hook default are
+            // written into config.json (see mergeZcodeHooks) so a pending
+            // approval can wait on the island for as long as Claude's does.
             return [
                 ("SessionStart", 5, false),
                 ("UserPromptSubmit", 5, true),
                 ("PreToolUse", 5, false),
+                ("PermissionRequest", 86400, false),
                 ("PostToolUse", 5, true),
                 ("PostToolUseFailure", 5, true),
                 ("Stop", 5, true),
             ]
         }
+    }
+
+    private static func traecliNextEvents() -> [(String, Int, Bool)] {
+        [
+            ("SessionStart", 5, false),
+            ("SessionEnd", 5, true),
+            ("UserPromptSubmit", 5, true),
+            ("PreToolUse", 5, false),
+            ("PostToolUse", 5, true),
+            ("PostToolUseFailure", 5, true),
+            ("PermissionRequest", 86400, false),
+            ("Notification", 86400, false),
+            ("SubagentStart", 5, true),
+            ("SubagentStop", 5, true),
+            ("Stop", 5, true),
+            ("PreCompact", 5, true),
+            ("PostCompact", 5, true),
+        ]
     }
 
     static func customCLIConfigs() -> [CustomCLIConfig] {
@@ -760,6 +867,10 @@ struct ConfigInstaller {
         // Clean up legacy paths at ~/.claude/hooks/ (#32)
         try? fm.removeItem(atPath: legacyBridgePath)
         try? fm.removeItem(atPath: legacyHookScriptPath)
+
+        // A previous run may have created the Claude config dir after the resolution was
+        // memoized, so re-resolve before installing into it.
+        ClaudeConfigPaths.invalidateCache()
 
         // Install hook script + bridge binary (shared by all CLIs)
         installHookScript(fm: fm)
@@ -895,6 +1006,8 @@ struct ConfigInstaller {
         // ZCode's config lives one level below the app's real root (~/.zcode/cli/),
         // so detect against the root itself rather than cli.dirPath (#245).
         if source == "zcode" { return FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.zcode") }
+        // Kimi Code CLI moved from ~/.kimi (kimi-cli) to ~/.kimi-code.
+        if source == "kimi" { return kimiPresenceDetected() }
         guard let cli = allCLIs.first(where: { $0.source == source }) else { return false }
         return FileManager.default.fileExists(atPath: cli.dirPath)
     }
@@ -1270,17 +1383,12 @@ struct ConfigInstaller {
     static func installExternalHooks(cli: CLIConfig, fm: FileManager) -> Bool {
         if cli.format == .cline { return installClineHooks(cli: cli, fm: fm) }
         if cli.format == .kimi {
-            // Kimi: do not create ~/.kimi or config files unless there is already
-            // evidence of an existing Kimi installation/configuration.
-            let rootDir = NSHomeDirectory() + "/.kimi"
-            let sessionsDir = rootDir + "/sessions"
-            let hasKimiPresence =
-                fm.fileExists(atPath: cli.dirPath) ||
-                fm.fileExists(atPath: rootDir) ||
-                fm.fileExists(atPath: sessionsDir)
-            guard hasKimiPresence else { return true }
-            if !fm.fileExists(atPath: cli.dirPath) {
-                try? fm.createDirectory(atPath: cli.dirPath, withIntermediateDirectories: true)
+            // Kimi: do not create ~/.kimi-code (or legacy ~/.kimi) unless there is
+            // already evidence of an existing install. Prefer the modern root.
+            guard kimiPresenceDetected(fm: fm) else { return true }
+            let rootDir = kimiHome(fm: fm)
+            if !fm.fileExists(atPath: rootDir) {
+                try? fm.createDirectory(atPath: rootDir, withIntermediateDirectories: true)
             }
             return installKimiHooks(cli: cli, fm: fm)
         }
@@ -1328,9 +1436,15 @@ struct ConfigInstaller {
 
         let root = parseJSONFile(at: cli.fullPath, fm: fm) ?? [:]
         var hooks = root[cli.configKey] as? [String: Any] ?? [:]
+        if cli.source == "traecli-next" {
+            // Clean up CodeIsland-managed entries written with the old Trae IDE
+            // event names (for example beforeReadFile) at the new Trae CLI path.
+            hooks = removeManagedHookEntries(from: hooks)
+        }
         // Quote the path in case home directory contains spaces or special characters
         let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
-        let baseCommand = "\(quotedBridge) --source \(cli.source)"
+        let bridgeSource = cli.bridgeSourceOverride ?? cli.source
+        let baseCommand = "\(quotedBridge) --source \(bridgeSource)"
 
         for (event, timeout, _) in cli.events {
             var eventEntries = hooks[event] as? [[String: Any]] ?? []
@@ -1344,7 +1458,9 @@ struct ConfigInstaller {
                 // — otherwise long-running PermissionRequest hooks hang the agent (#103).
                 entry = ["matcher": "*", "hooks": [["type": "command", "command": baseCommand, "timeout": timeout] as [String: Any]]]
             case .nested:
-                let cmd = cli.source == "gemini" ? "\(baseCommand) --event \(event)" : baseCommand
+                let cmd = (cli.source == "gemini" || cli.source == "traecli-next")
+                    ? "\(baseCommand) --event \(event)"
+                    : baseCommand
                 entry = ["hooks": [["type": "command", "command": cmd, "timeout": timeout] as [String: Any]]]
             case .flat:
                 entry = ["command": "\(baseCommand) --event \(event)"]
@@ -2097,17 +2213,23 @@ struct ConfigInstaller {
         return removeManagedHermesHooks(from: normalized) != normalized
     }
 
-    // MARK: - ZCode config.json (#245)
+    // MARK: - ZCode config.json (#245, #258)
     //
     // ZCode (Z.ai) is an Electron desktop app — NOT a Claude Code fork. Hooks
     // live under `hooks: {enabled, events}`, where `events` maps event names
-    // to Claude/nested-shaped entries ({hooks: [{type, command}]}) — the same
-    // shape `containsOurHook` / `removeManagedHookEntries` already understand,
-    // so those generic helpers apply unchanged to the `events` sub-dict. The
-    // event-name schema is STRICT: any key outside `zcodeAllowedEvents`
-    // silently drops the WHOLE `hooks` config on load — never write outside
-    // that whitelist. No hot-reload; a ZCode restart is required after any
-    // config.json edit.
+    // to Claude/nested-shaped entries ({hooks: [{type, command, timeout?}]}) —
+    // the same shape `containsOurHook` / `removeManagedHookEntries` already
+    // understand, so those generic helpers apply unchanged to the `events`
+    // sub-dict. The event-name schema is STRICT: any key outside
+    // `zcodeAllowedEvents` silently drops the WHOLE `hooks` config on load —
+    // never write outside that whitelist. Hook OUTPUT is equally strict
+    // (Zod .strict() in the kernel): a PermissionRequest decision must be
+    // exactly {behavior, permissionUpdates?/updatedInput?} or
+    // {behavior: "deny", interrupt?, message?} — Claude's
+    // `updatedPermissions`/`destination` keys fail validation and the whole
+    // decision is discarded (ZCode then shows its own dialog). See
+    // AppState.zcodeAlwaysAllowResponse for the always-allow shape. No
+    // hot-reload; a ZCode restart is required after any config.json edit.
 
     /// The only 7 event names ZCode's schema accepts. Writing anything else
     /// causes the entire `hooks` config to be silently discarded on load —
@@ -2145,9 +2267,18 @@ struct ConfigInstaller {
         var events = removeManagedHookEntries(from: hooksRoot["events"] as? [String: Any] ?? [:])
 
         let command = zcodeInjectedCommand()
-        for (event, _, _) in defaultEvents(for: .zcode) where zcodeAllowedEvents.contains(event) {
+        for (event, timeout, _) in defaultEvents(for: .zcode) where zcodeAllowedEvents.contains(event) {
             var entries = events[event] as? [[String: Any]] ?? []
-            entries.append(["hooks": [["type": "command", "command": command] as [String: Any]]])
+            var hook: [String: Any] = ["type": "command", "command": command]
+            // ZCode's per-hook default timeout is 60s. Status hooks keep that
+            // default (the bridge self-limits far below it); blocking hooks
+            // (PermissionRequest) must override it or ZCode would abandon the
+            // approval after a minute and pop its own dialog. `timeout` is
+            // ZCode-native seconds (its kernel converts to ms internally).
+            if timeout > 60 {
+                hook["timeout"] = timeout
+            }
+            entries.append(["hooks": [hook]])
             events[event] = entries
         }
 
@@ -2563,12 +2694,18 @@ struct ConfigInstaller {
     }
 
     private static func isKimiHooksInstalled(cli: CLIConfig, fm: FileManager) -> Bool {
-        guard fm.fileExists(atPath: cli.fullPath),
-              let data = fm.contents(atPath: cli.fullPath),
-              let contents = String(data: data, encoding: .utf8) else { return false }
-
-        return cli.events.allSatisfy { (event, _, _) in
-            contentsContainsKimiHook(contents, event: event)
+        // Prefer modern home, but also treat legacy ~/.kimi as installed if our
+        // hooks are still there (migration leaves the old tree intact).
+        var candidates = [kimiCodeHome() + "/config.toml", kimiLegacyHome() + "/config.toml"]
+        let resolved = cli.fullPath
+        if !candidates.contains(resolved) { candidates.append(resolved) }
+        return candidates.contains { path in
+            guard fm.fileExists(atPath: path),
+                  let data = fm.contents(atPath: path),
+                  let contents = String(data: data, encoding: .utf8) else { return false }
+            return cli.events.allSatisfy { (event, _, _) in
+                contentsContainsKimiHook(contents, event: event)
+            }
         }
     }
 
@@ -2611,31 +2748,38 @@ struct ConfigInstaller {
             return
         }
         if cli.format == .kimi {
-            guard fm.fileExists(atPath: cli.fullPath),
-                  let data = fm.contents(atPath: cli.fullPath),
-                  var contents = String(data: data, encoding: .utf8) else { return }
-            contents = removeKimiHooks(from: contents)
+            // Scrub modern + legacy homes; also honor absolute cli.fullPath
+            // (hermetic tests / custom roots).
+            var paths = [kimiCodeHome() + "/config.toml", kimiLegacyHome() + "/config.toml"]
+            let resolved = cli.fullPath
+            if !paths.contains(resolved) { paths.append(resolved) }
+            for path in paths {
+                guard fm.fileExists(atPath: path),
+                      let data = fm.contents(atPath: path),
+                      var contents = String(data: data, encoding: .utf8) else { continue }
+                contents = removeKimiHooks(from: contents)
 
-            // Restore commented-out legacy scalar hooks
-            let lines = contents.components(separatedBy: "\n")
-            var restored: [String] = []
-            for line in lines {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed == "# [CodeIsland] commented out legacy scalar hooks to avoid TOML conflict" {
-                    continue
+                // Restore commented-out legacy scalar hooks
+                let lines = contents.components(separatedBy: "\n")
+                var restored: [String] = []
+                for line in lines {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if trimmed == "# [CodeIsland] commented out legacy scalar hooks to avoid TOML conflict" {
+                        continue
+                    }
+                    if trimmed.range(of: #"^#\s*hooks\s*="#, options: .regularExpression) != nil {
+                        restored.append(line.replacingOccurrences(of: #"^#\s*"#, with: "", options: .regularExpression))
+                    } else {
+                        restored.append(line)
+                    }
                 }
-                if trimmed.range(of: #"^#\s*hooks\s*="#, options: .regularExpression) != nil {
-                    restored.append(line.replacingOccurrences(of: #"^#\s*"#, with: "", options: .regularExpression))
-                } else {
-                    restored.append(line)
+                while let last = restored.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+                    restored.removeLast()
                 }
-            }
-            while let last = restored.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
-                restored.removeLast()
-            }
-            contents = restored.joined(separator: "\n")
+                contents = restored.joined(separator: "\n")
 
-            fm.createFile(atPath: cli.fullPath, contents: contents.data(using: .utf8))
+                fm.createFile(atPath: path, contents: contents.data(using: .utf8))
+            }
             return
         }
 
@@ -3235,7 +3379,7 @@ struct ConfigInstaller {
     }
 
     /// Current OpenCode plugin version — bump when codeisland-opencode.js changes
-    private static let opencodePluginVersion = "v4"
+    private static let opencodePluginVersion = "v6"
 
     private static func isOpencodePluginInstalled(fm: FileManager) -> Bool {
         guard fm.fileExists(atPath: opencodePluginPath) else { return false }

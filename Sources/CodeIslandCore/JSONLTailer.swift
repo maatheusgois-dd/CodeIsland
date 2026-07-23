@@ -1,21 +1,57 @@
 import Foundation
 import Darwin
 
+public enum ConversationTurnStatus: Equatable, Sendable {
+    case processing
+    case idle
+}
+
+/// Trailing-question state derived from a Cursor `role`-keyed transcript.
+///
+/// Cursor's AskQuestion tool has no hook channel — the question is asked and
+/// answered entirely inside Cursor's own UI (issue #265). The only observable
+/// signal is the transcript: the asking assistant entry ends the file until the
+/// user answers, at which point newer entries are appended. `pending` therefore
+/// means "the newest entry contains an unanswered question tool call" and
+/// `cleared` means "a newer entry superseded any earlier question".
+public enum CursorQuestionSignal: Equatable, Sendable {
+    /// The newest transcript entry asks a question that has not been answered.
+    /// `prompt` is the extracted question text; empty when the tool call was
+    /// recognized but its arguments carried no extractable text.
+    case pending(prompt: String)
+    /// A newer user/assistant entry exists, so no question is pending.
+    case cleared
+}
+
 /// A delta emitted by `JSONLTailer` whenever the watched transcript grows.
 public struct ConversationTailDelta: Equatable, Sendable {
     public let sessionId: String
     public let lastUserPrompt: String?
     public let lastAssistantMessage: String?
+    public let turnStatus: ConversationTurnStatus?
+    public let hasActivity: Bool
+    public let cursorQuestion: CursorQuestionSignal?
 
-    public init(sessionId: String, lastUserPrompt: String?, lastAssistantMessage: String?) {
+    public init(
+        sessionId: String,
+        lastUserPrompt: String?,
+        lastAssistantMessage: String?,
+        turnStatus: ConversationTurnStatus? = nil,
+        hasActivity: Bool = false,
+        cursorQuestion: CursorQuestionSignal? = nil
+    ) {
         self.sessionId = sessionId
         self.lastUserPrompt = lastUserPrompt
         self.lastAssistantMessage = lastAssistantMessage
+        self.turnStatus = turnStatus
+        self.hasActivity = hasActivity
+        self.cursorQuestion = cursorQuestion
     }
 
     /// A delta only carries signal when at least one field is non-nil.
     public var isEmpty: Bool {
-        lastUserPrompt == nil && lastAssistantMessage == nil
+        lastUserPrompt == nil && lastAssistantMessage == nil && turnStatus == nil
+            && !hasActivity && cursorQuestion == nil
     }
 }
 
@@ -181,13 +217,23 @@ public final class JSONLTailer: @unchecked Sendable {
 
         let scan = JSONLTailer.scanLines(combined)
         watch.pendingFragment = scan.trailingFragment
-        watch.offset += off_t(combined.count - scan.trailingFragment.count)
+        // Advance by the bytes actually read from disk — the trailing fragment is
+        // carried purely in memory and its file bytes are already consumed here.
+        // Mixing the fragment into the offset math (the previous
+        // `combined.count - trailingFragment.count`) drifted the offset past EOF
+        // after every fragment episode; the next small append then looked like a
+        // truncation and re-scanned the whole file from byte 0 on each event,
+        // pinning a core on overnight-grown transcripts (#278).
+        watch.offset += off_t(appended.count)
 
         if !scan.delta.isEmpty {
             let delta = ConversationTailDelta(
                 sessionId: watch.sessionId,
                 lastUserPrompt: scan.delta.lastUserPrompt,
-                lastAssistantMessage: scan.delta.lastAssistantMessage
+                lastAssistantMessage: scan.delta.lastAssistantMessage,
+                turnStatus: scan.delta.turnStatus,
+                hasActivity: scan.delta.hasActivity,
+                cursorQuestion: scan.delta.cursorQuestion
             )
             onDelta(delta)
         }
@@ -220,7 +266,13 @@ public final class JSONLTailer: @unchecked Sendable {
         public struct Delta: Equatable {
             public var lastUserPrompt: String?
             public var lastAssistantMessage: String?
-            public var isEmpty: Bool { lastUserPrompt == nil && lastAssistantMessage == nil }
+            public var turnStatus: ConversationTurnStatus?
+            public var hasActivity = false
+            public var cursorQuestion: CursorQuestionSignal?
+            public var isEmpty: Bool {
+                lastUserPrompt == nil && lastAssistantMessage == nil && turnStatus == nil
+                    && !hasActivity && cursorQuestion == nil
+            }
         }
         public let delta: Delta
         public let trailingFragment: Data
@@ -248,6 +300,17 @@ public final class JSONLTailer: @unchecked Sendable {
 
         let fragment = Data(data[lineStart..<data.endIndex])
         return ScanResult(delta: delta, trailingFragment: fragment)
+    }
+
+    /// Return the most recent Codex turn state in a transcript blob.
+    public static func latestTurnStatus(in data: Data) -> ConversationTurnStatus? {
+        scanLines(data).delta.turnStatus
+    }
+
+    /// Return the trailing Cursor question state in a transcript blob, or nil
+    /// when the blob contained no role-keyed user/assistant entries at all.
+    public static func latestCursorQuestion(in data: Data) -> CursorQuestionSignal? {
+        scanLines(data).delta.cursorQuestion
     }
 
     private static func apply(line: Data.SubSequence, into delta: inout ScanResult.Delta) {
@@ -285,17 +348,142 @@ public final class JSONLTailer: @unchecked Sendable {
                     delta.lastAssistantMessage = trimmed
                 }
             }
+        case "event_msg":
+            delta.hasActivity = true
+            guard let payload = json["payload"] as? [String: Any],
+                  let eventType = payload["type"] as? String else { return }
+            switch eventType {
+            case "task_started":
+                delta.turnStatus = .processing
+            // "turn_failed" is not in today's codex EventMsg enum — kept as a
+            // forward-compatible guess at the obvious name for a failed turn.
+            case "task_complete", "turn_aborted", "turn_failed":
+                delta.turnStatus = .idle
+            default:
+                break
+            }
+        default:
+            // Cursor agent transcripts key their entries on a top-level `role`
+            // instead of `type`: `{"role":"user","message":{"content":[...]}}`.
+            // Restrict the branch to lines with no `type` at all so type-keyed
+            // formats (Claude, CodeBuddy `"type":"message"`, …) never route here.
+            if type == nil, let role = json["role"] as? String {
+                applyCursorRoleLine(role: role, message: message, into: &delta)
+            }
+        }
+    }
+
+    /// Handle one Cursor `role`-keyed transcript entry.
+    ///
+    /// Only the trailing-question state is derived here: an assistant entry
+    /// carrying an unanswered AskQuestion tool call marks the question pending,
+    /// and any other user/assistant entry supersedes it — last writer wins, so
+    /// only the newest entry in a scan determines the state.
+    ///
+    /// Chat text is deliberately NOT extracted from this shape: Cursor hooks
+    /// (`beforeSubmitPrompt` / `afterAgentResponse`) already stream the same
+    /// messages, and the transcript copies differ cosmetically (`<user_query>`
+    /// wrappers, redaction markers), so a second source would produce
+    /// near-duplicate chat rows.
+    private static func applyCursorRoleLine(
+        role: String,
+        message: [String: Any],
+        into delta: inout ScanResult.Delta
+    ) {
+        switch role {
+        case "user":
+            delta.cursorQuestion = .cleared
+        case "assistant":
+            if let prompt = cursorQuestionPrompt(inContent: message["content"]) {
+                delta.cursorQuestion = .pending(prompt: prompt)
+            } else {
+                delta.cursorQuestion = .cleared
+            }
         default:
             break
         }
     }
 
+    /// Extract the question text when a Cursor assistant `content` array carries a
+    /// blocking question tool call. Returns nil when the entry asks no question
+    /// (including `run_async` questions, which don't block the agent). An empty
+    /// string means "a question is pending but its text could not be extracted".
+    static func cursorQuestionPrompt(inContent content: Any?) -> String? {
+        guard let blocks = content as? [[String: Any]] else { return nil }
+        for block in blocks {
+            guard (block["type"] as? String) == "tool_use",
+                  let name = block["name"] as? String,
+                  isCursorQuestionToolName(name) else { continue }
+            let input = block["input"] as? [String: Any]
+            // Async questions let the agent keep working — not a blocking wait.
+            // The args casing follows the model-facing schema, which has been
+            // observed as both snake_case and camelCase across tool versions.
+            if (input?["run_async"] as? Bool) == true || (input?["runAsync"] as? Bool) == true {
+                continue
+            }
+            return cursorQuestionText(fromInput: input)
+        }
+        return nil
+    }
+
+    /// True when `name` is Cursor's question tool. Matched loosely (case- and
+    /// separator-insensitive) because the transcript records the model-facing
+    /// tool name, which Cursor has renamed across releases.
+    static func isCursorQuestionToolName(_ name: String) -> Bool {
+        let normalized = name.lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        switch normalized {
+        case "askquestion", "askquestions", "askuserquestion", "askfollowupquestion":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Compose display text from AskQuestion tool args:
+    /// `{title, questions: [{id, prompt, options: [{id, label}], allow_multiple}]}`.
+    /// Prefers the first question's prompt (with a numeric `(+N)` suffix when more
+    /// follow), falls back to the title, then to a flat `question`/`prompt` field,
+    /// and finally to "" so the caller still knows a question is pending.
+    private static func cursorQuestionText(fromInput input: [String: Any]?) -> String {
+        guard let input else { return "" }
+
+        var prompts: [String] = []
+        if let questions = input["questions"] as? [[String: Any]] {
+            for question in questions {
+                let raw = (question["prompt"] as? String) ?? (question["question"] as? String)
+                if let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    prompts.append(text)
+                }
+            }
+        }
+        if let first = prompts.first {
+            return prompts.count > 1 ? "\(first) (+\(prompts.count - 1))" : first
+        }
+
+        if let title = (input["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !title.isEmpty {
+            return title
+        }
+        // Forward-compatible flat shape.
+        let flat = (input["question"] as? String) ?? (input["prompt"] as? String)
+        if let text = flat?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            return text
+        }
+        return ""
+    }
+
     /// Types we care about for the panel: `"user"` and `"assistant"`. Anything
     /// else — including unknown types and absent-type lines — can be skipped
-    /// without bothering the JSON parser.
+    /// without bothering the JSON parser. `cursorRole` marks lines that carry
+    /// no interesting `type` value but do contain a `"role":"user|assistant"`
+    /// marker (Cursor's transcript shape) and therefore still deserve a parse.
     enum QuickTypeKind: Equatable {
         case user
         case assistant
+        case codexEvent
+        case cursorRole
         case irrelevant
     }
 
@@ -348,6 +536,10 @@ public final class JSONLTailer: @unchecked Sendable {
                             if hasExactValue(ptr, at: valueStart, total: total, expect: plannerResponseBytes) {
                                 return .assistant
                             }
+                        case 0x65:  // 'e'
+                            if hasExactValue(ptr, at: valueStart, total: total, expect: eventMsgBytes) {
+                                return .codexEvent
+                            }
                         default:
                             break
                         }
@@ -359,6 +551,29 @@ public final class JSONLTailer: @unchecked Sendable {
                     index += 1
                 }
             }
+
+            // No interesting `type` value — check for Cursor's `role`-keyed shape
+            // before giving up. Cursor's writer serializes `{role, message}` with
+            // `role` as the first key, so an O(1) prefix check suffices. Scanning
+            // the whole line instead would misroute the bulk of Codex rollouts
+            // (`response_item` lines carry a nested `"role":"assistant"`) into
+            // the JSON parser and regress streaming CPU. `apply` re-verifies the
+            // shape against the parsed JSON.
+            let roleLen = roleMarker.count
+            if total > roleLen + 1, ptr[0] == 0x7B {  // '{'
+                var prefixMatched = true
+                for offset in 0..<roleLen where ptr[1 + offset] != roleMarker[offset] {
+                    prefixMatched = false
+                    break
+                }
+                if prefixMatched {
+                    let valueStart = 1 + roleLen
+                    if hasExactValue(ptr, at: valueStart, total: total, expect: userBytes)
+                        || hasExactValue(ptr, at: valueStart, total: total, expect: assistantBytes) {
+                        return .cursorRole
+                    }
+                }
+            }
             return .irrelevant
         }
     }
@@ -366,10 +581,14 @@ public final class JSONLTailer: @unchecked Sendable {
     /// The `"type":"` prefix before the type value. Placed in the header so
     /// the scanner can bail early on typical tool/meta lines.
     private static let typeMarker: [UInt8] = Array(#""type":""#.utf8)
+    /// The `"role":"` prefix — Cursor transcripts key entries on `role` only.
+    private static let roleMarker: [UInt8] = Array(#""role":""#.utf8)
     private static let userBytes: [UInt8] = Array(#"user""#.utf8)
     private static let assistantBytes: [UInt8] = Array(#"assistant""#.utf8)
     private static let userInputBytes: [UInt8] = Array(#"USER_INPUT""#.utf8)
     private static let plannerResponseBytes: [UInt8] = Array(#"PLANNER_RESPONSE""#.utf8)
+
+    private static let eventMsgBytes: [UInt8] = Array(#"event_msg""#.utf8)
 
     private static func hasExactValue(
         _ ptr: UnsafePointer<UInt8>,

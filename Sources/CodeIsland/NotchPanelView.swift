@@ -2,7 +2,7 @@ import SwiftUI
 import CodeIslandCore
 
 /// Shared bounds for the collapsed-width scale setting — keeps the settings
-/// slider and the width math in lockstep. Percent of the simulated notch width.
+/// slider and the width math in lockstep. Percent of the (simulated) notch width.
 enum NotchWidthScale {
     static let min = 50
     static let max = 150
@@ -10,10 +10,13 @@ enum NotchWidthScale {
 }
 
 enum NotchWidthMetrics {
+    /// On notched displays the island can grow beyond the physical notch but never
+    /// shrink under it — narrower would expose the bare hardware cutout (#268).
     static func effectiveNotchWidth(notchW: CGFloat, collapsedWidthScale: Int, hasNotch: Bool) -> CGFloat {
-        if hasNotch { return notchW }
         let clampedScale = Swift.max(NotchWidthScale.min, Swift.min(collapsedWidthScale, NotchWidthScale.max))
-        return notchW * CGFloat(clampedScale) / 100.0
+        let scaled = notchW * CGFloat(clampedScale) / 100.0
+        if hasNotch { return Swift.max(notchW, scaled) }
+        return scaled
     }
 }
 
@@ -134,7 +137,7 @@ struct NotchPanelView: View {
     /// Minimum wing width needed to display compact bar content
     private var compactWingWidth: CGFloat { mascotSize + 14 }
 
-    /// Effective island width — scale only applies to simulated notches on non-notch screens.
+    /// Effective island width — on notched screens the scale can only widen past the notch.
     private var effectiveNotchW: CGFloat {
         NotchWidthMetrics.effectiveNotchWidth(
             notchW: notchW,
@@ -2317,6 +2320,11 @@ private struct SessionCard: View {
         appState.permissionQueue.firstIndex { ($0.event.sessionId ?? "default") == sessionId }
     }
     private var isActiveApproval: Bool { approvalQueueIndex == 0 }
+    /// Cursor is blocked on a question answered inside its own UI (#265) —
+    /// a display-only wait with no in-panel answer flow.
+    private var showsExternalCursorQuestion: Bool {
+        session.status == .waitingQuestion && session.cursorPendingQuestion != nil
+    }
     private var statusNameColor: Color {
         if session.status == .idle && session.interrupted {
             return Color(red: 1.0, green: 0.45, blue: 0.35)
@@ -2520,6 +2528,29 @@ private struct SessionCard: View {
                     }
                 }
 
+                // Cursor asked a question in its own UI (#265). There is no hook
+                // channel to answer from here, so show the question plus a hint
+                // instead of an endless "thinking" indicator.
+                if showsExternalCursorQuestion {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let question = session.cursorPendingQuestion, !question.isEmpty {
+                            HStack(alignment: .top, spacing: 5) {
+                                Text("?")
+                                    .font(.system(size: fontSize, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2))
+                                Text(question)
+                                    .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(2)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        Text(L10n.shared["cursor_question_answer_hint"])
+                            .font(.system(size: max(10, fontSize - 1), design: .monospaced))
+                            .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2).opacity(0.85))
+                    }
+                }
+
                 // Session title: first user prompt (hide when detailed mode shows chat history)
                 if let prompt = session.lastUserPrompt,
                    session.recentMessages.isEmpty {
@@ -2548,8 +2579,10 @@ private struct SessionCard: View {
                         )
                     }
 
-                    // Working indicator: show what AI is doing right now
-                    if session.status != .idle {
+                    // Working indicator: show what AI is doing right now.
+                    // Suppressed while a Cursor-side question is pending — the
+                    // question block above already explains the wait (#265).
+                    if session.status != .idle && !showsExternalCursorQuestion {
                         WorkingIndicator(
                             fontSize: fontSize,
                             currentTool: session.currentTool,
@@ -3122,6 +3155,7 @@ private let cliIconFiles: [String: String] = [
     "trae": "trae",
     "traecn": "trae",
     "traecli": "trae",
+    "traecli-next": "trae",
     "copilot": "copilot",
     "qoder": "qoder",
     "qoder-cli": "qoder",

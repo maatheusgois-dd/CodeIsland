@@ -84,6 +84,9 @@ public struct SessionSnapshot: Sendable {
     public var toolHistory: [ToolHistoryEntry] = []
     public var totalToolCallCount: Int = 0
     public var subagents: [String: SubagentState] = [:]
+    /// Agent ids closed by SubagentStop/Stop/SessionEnd.
+    /// Blocks merge/fold from putting a finished subagent back on the parent.
+    public var closedSubagentIds: Set<String> = []
     public var startTime: Date = Date()
     public var lastUserPrompt: String?
     public var lastAssistantMessage: String?
@@ -91,6 +94,12 @@ public struct SessionSnapshot: Sendable {
     /// by hooks (`transcript_path` field) and by filesystem discovery, consumed by the
     /// JSONLTailer for incremental streaming of the latest assistant reply.
     public var transcriptPath: String?
+    /// Cursor-only (#265): question text of an AskQuestion the IDE is currently
+    /// blocked on. Cursor exposes no hook for its question tool, so this is a
+    /// display-only wait — the user answers inside Cursor itself. Non-nil means
+    /// a question is pending ("" = pending but text unknown). Set and cleared by
+    /// transcript-tail detection; transient, never persisted.
+    public var cursorPendingQuestion: String?
     /// Recent chat messages (max 3) for preview
     public var recentMessages: [ChatMessage] = []
     // Terminal info for window activation
@@ -180,6 +189,12 @@ public struct SessionSnapshot: Sendable {
             "qoder work": "qoderwork",
             "kimi-cli": "kimi",
             "kimicli": "kimi",
+            "kimi-code": "kimi",
+            "kimicode": "kimi",
+            "kimi_code": "kimi",
+            "kimi-code-cli": "kimi",
+            "kimicodecli": "kimi",
+            "kimi_code_cli": "kimi",
             "kiro-cli": "kiro",
             "kirocli": "kiro",
             "codebuddycn": "codybuddycn",
@@ -290,7 +305,7 @@ public struct SessionSnapshot: Sendable {
     static let agentMetadataDirNames: Set<String> = [
         ".claude", ".cursor", ".codex", ".gemini", ".qoder", ".qoderwork",
         ".trae", ".trae-cn", ".kiro", ".copilot", ".factory", ".codebuddy",
-        ".codybuddycn", ".stepfun", ".workbuddy", ".hermes", ".kimi",
+        ".codybuddycn", ".stepfun", ".workbuddy", ".hermes", ".kimi", ".kimi-code",
         ".pi", ".omp", ".qwen", ".zcode", ".openclaw", ".codeisland",
     ]
 
@@ -773,10 +788,14 @@ public func reduceEvent(
     }
 
     // Always update metadata from parent events. Subagent events are routed
-    // through the parent session ID, so applying their metadata here would
+    // through the parent session ID, so applying their full metadata here would
     // overwrite the parent's model/transcript/title with child-session values.
+    // Still fill *missing* identity fields so a merge-first Task hook does not
+    // leave the parent stuck as the default `source == "claude"`.
     if event.agentId == nil {
         extractMetadata(into: &sessions, sessionId: sessionId, event: event)
+    } else {
+        fillMissingParentMetadataFromSubagentEvent(into: &sessions, sessionId: sessionId, event: event)
     }
     let isRemote = sessions[sessionId]?.isRemote == true
 
@@ -818,6 +837,11 @@ public func reduceEvent(
         sessions[sessionId]?.status = .processing
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
+        // Separate-mode Cursor Task Stop self-tombstones; a new prompt means relaunch.
+        if let source = sessions[sessionId]?.source,
+           source == "cursor" || source == "cursor-cli" {
+            sessions[sessionId]?.closedSubagentIds.remove(sessionId)
+        }
         // Probe a wider set of field names + nested containers. Qwen Code (#103),
         // Hermes (#117), and most Claude forks put the prompt at "prompt" top-level,
         // but some forks nest it inside `input` / `data` / `payload` / `params`,
@@ -891,12 +915,26 @@ public func reduceEvent(
             sessions[sessionId]?.lastAssistantMessage = text
             sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: false, text: text))
         }
+        let hasActiveSubagents = sessions[sessionId]?.subagents.values.contains {
+            $0.status != .idle
+        } == true
         if let source = sessions[sessionId]?.source,
            SessionSnapshot.ideCompletionSources.contains(source) {
-            sessions[sessionId]?.status = .idle
-            sessions[sessionId]?.currentTool = nil
-            sessions[sessionId]?.toolDescription = nil
-            effects.append(.enqueueCompletion(sessionId: sessionId))
+            // Parent chat finished a turn while folded Tasks are still working —
+            // keep the card active and do not pop a premature completion.
+            if hasActiveSubagents {
+                if !isWaiting {
+                    sessions[sessionId]?.status = .running
+                    if sessions[sessionId]?.currentTool == nil {
+                        sessions[sessionId]?.currentTool = "Agent"
+                    }
+                }
+            } else {
+                sessions[sessionId]?.status = .idle
+                sessions[sessionId]?.currentTool = nil
+                sessions[sessionId]?.toolDescription = nil
+                effects.append(.enqueueCompletion(sessionId: sessionId))
+            }
         } else {
             sessions[sessionId]?.status = .processing
         }
@@ -927,10 +965,29 @@ public func reduceEvent(
     case "Stop":
         // Detect ESC/Ctrl+C interruption
         let stopReason = event.rawJSON["stop_reason"] as? String ?? ""
-        sessions[sessionId]?.interrupted = (stopReason == "user" || stopReason == "interrupted")
-        sessions[sessionId]?.status = .idle
-        sessions[sessionId]?.currentTool = nil
-        sessions[sessionId]?.toolDescription = nil
+        let wasInterrupted = (stopReason == "user" || stopReason == "interrupted")
+        let hasActiveSubagents = sessions[sessionId]?.subagents.values.contains {
+            $0.status != .idle
+        } == true
+        // Separate-mode Cursor Tasks have no agent_id, so merge later must see
+        // this id as closed — otherwise a still-live IDE `_ppid` resuscitates them.
+        // Only self-tombstone foldable Task cards (transcript parent ≠ session id),
+        // never the parent chat — that would suppress late Permission UI and wipe
+        // the IDE `_ppid` monitor after a normal turn Stop.
+        if !hasActiveSubagents,
+           let source = sessions[sessionId]?.source,
+           source == "cursor" || source == "cursor-cli",
+           CursorSessionFolding.foldTarget(
+               childSessionId: sessionId,
+               transcriptPath: sessions[sessionId]?.transcriptPath
+           ) != nil {
+            sessions[sessionId]?.closedSubagentIds.insert(sessionId)
+            // Drop process identity so a still-open IDE `_ppid` does not look like
+            // a live Task after Stop when the card is later considered for merge.
+            sessions[sessionId]?.cliPid = nil
+            sessions[sessionId]?.cliStartTime = nil
+        }
+
         let assistantMsg = firstStringFromEvent(
             event,
             keys: ["last_assistant_message", "text", "message", "summary"],
@@ -952,7 +1009,24 @@ public func reduceEvent(
                 sessions[sessionId]?.insertRecentMessage(ChatMessage(isUser: true, text: prompt), at: insertAt)
             }
         }
-        effects.append(.enqueueCompletion(sessionId: sessionId))
+
+        // Parent chat Stop while folded Tasks are still working — keep the card
+        // active and do not pop a premature completion (same as AfterAgentResponse).
+        if hasActiveSubagents {
+            if !isWaiting {
+                sessions[sessionId]?.status = .running
+                if sessions[sessionId]?.currentTool == nil {
+                    sessions[sessionId]?.currentTool = "Agent"
+                }
+            }
+            // Do not latch `interrupted` onto a still-active parent+Task card.
+        } else {
+            sessions[sessionId]?.interrupted = wasInterrupted
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+            effects.append(.enqueueCompletion(sessionId: sessionId))
+        }
     case "SessionStart":
         effects.append(.stopMonitor(sessionId: sessionId))
         sessions[sessionId] = SessionSnapshot(startTime: Date())
@@ -1129,6 +1203,63 @@ private func applyEnvMetadata(into sessions: inout [String: SessionSnapshot], se
     }
 }
 
+/// Fill identity fields on a parent card from a merged Task/subagent hook.
+/// Unlike `extractMetadata`, never overwrites values already set on the parent
+/// (child payloads can carry Task-specific cwd/model/title).
+public func fillMissingParentMetadataFromSubagentEvent(
+    into sessions: inout [String: SessionSnapshot],
+    sessionId: String,
+    event: HookEvent
+) {
+    // Default SessionSnapshot.source is "claude". Upgrade when the hook carries a
+    // real source so merge-first Cursor Tasks are not branded as Claude forever.
+    if sessions[sessionId]?.source == "claude",
+       let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
+        ?? SessionSnapshot.normalizedSupportedSource(event.rawJSON["source"] as? String),
+       source != "claude" {
+        sessions[sessionId]?.source = source
+    }
+
+    let cwdMissing = sessions[sessionId]?.cwd == nil
+        || SessionSnapshot.isUnhelpfulHookCwd(sessions[sessionId]?.cwd ?? "")
+    if cwdMissing {
+        if let cwd = event.rawJSON["cwd"] as? String, !cwd.isEmpty,
+           !SessionSnapshot.isUnhelpfulHookCwd(cwd) {
+            sessions[sessionId]?.cwd = cwd
+        } else if let roots = event.rawJSON["workspace_roots"] as? [String],
+                  let first = roots.first, !first.isEmpty {
+            sessions[sessionId]?.cwd = first
+        } else if let tp = event.rawJSON["transcript_path"] as? String,
+                  tp.contains("/.cursor/projects/") {
+            let parts = tp.split(separator: "/")
+            if let idx = parts.firstIndex(of: "projects"), idx + 1 < parts.count {
+                let projectName = String(parts[idx + 1])
+                sessions[sessionId]?.cwd = "/\(parts[...idx].joined(separator: "/"))/\(projectName)"
+            }
+        }
+    }
+
+    if sessions[sessionId]?.transcriptPath == nil,
+       let transcriptPath = event.rawJSON["transcript_path"] as? String, !transcriptPath.isEmpty {
+        sessions[sessionId]?.transcriptPath = transcriptPath
+    }
+
+    if sessions[sessionId]?.cliPid == nil,
+       let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
+        sessions[sessionId]?.cliPid = pid_t(ppid)
+    }
+}
+
+private func shouldReopenCursorSubagentOnPrompt(event: HookEvent, session: SessionSnapshot?) -> Bool {
+    if (event.rawJSON["_cursor_subagent"] as? Bool) == true {
+        return true
+    }
+    let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
+        ?? SessionSnapshot.normalizedSupportedSource(event.rawJSON["source"] as? String)
+        ?? session?.source
+    return source == "cursor" || source == "cursor-cli"
+}
+
 public func extractMetadata(into sessions: inout [String: SessionSnapshot], sessionId: String, event: HookEvent) {
     let eventCwd = event.rawJSON["cwd"] as? String
     if let cwd = eventCwd, !cwd.isEmpty,
@@ -1256,15 +1387,44 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     }
 }
 
+/// Pull a non-empty string from a hook JSON value.
+/// Supports plain strings and content-part arrays such as Kimi Code CLI's
+/// `prompt: [{ "type": "text", "text": "..." }]`.
+private func stringFromHookJSONValue(_ value: Any?) -> String? {
+    if let value = value as? String {
+        // Trim only to detect empty / whitespace-only payloads; return the
+        // original value so callers preserve any leading/trailing
+        // whitespace inside code-snippet prompts and multi-line content.
+        return value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
+            ? nil : value
+    }
+
+    let parts: [[String: Any]]
+    if let typed = value as? [[String: Any]] {
+        parts = typed
+    } else if let anyParts = value as? [Any] {
+        parts = anyParts.compactMap { $0 as? [String: Any] }
+        if parts.isEmpty { return nil }
+    } else {
+        return nil
+    }
+
+    let texts = parts.compactMap { part -> String? in
+        if let type = part["type"] as? String, type != "text" { return nil }
+        guard let text = part["text"] as? String,
+              !text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return text
+    }
+    let joined = texts.joined()
+    return joined.isEmpty ? nil : joined
+}
+
 private func firstStringFromDict(_ dict: [String: Any], keys: [String]) -> String? {
     for key in keys {
-        if let value = dict[key] as? String {
-            // Trim only to detect empty / whitespace-only payloads; return the
-            // original value so callers preserve any leading/trailing
-            // whitespace inside code-snippet prompts and multi-line content.
-            if !value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
-                return value
-            }
+        if let value = stringFromHookJSONValue(dict[key]) {
+            return value
         }
     }
     return nil
@@ -1294,13 +1454,20 @@ private func ensureSubagent(
     sessionId: String,
     agentId: String,
     event: HookEvent
-) {
+) -> Bool {
+    // Only SubagentStart/SessionStart may reopen a closed agent id for most
+    // providers. Cursor Tasks relaunch via UserPromptSubmit (see handleSubagentEvent).
+    // Later tool/response hooks with the same agent_id must not revive it.
+    if sessions[sessionId]?.closedSubagentIds.contains(agentId) == true {
+        return false
+    }
     if sessions[sessionId]?.subagents[agentId] == nil {
         sessions[sessionId]?.subagents[agentId] = SubagentState(
             agentId: agentId,
             agentType: subagentType(from: event)
         )
     }
+    return true
 }
 
 /// Handle subagent events. Returns true if the event was consumed.
@@ -1316,6 +1483,7 @@ private func handleSubagentEvent(
     switch eventName {
     case "SubagentStart", "SessionStart":
         let agentType = subagentType(from: event)
+        sessions[sessionId]?.closedSubagentIds.remove(agentId)
         sessions[sessionId]?.subagents[agentId] = SubagentState(
             agentId: agentId,
             agentType: agentType
@@ -1331,7 +1499,13 @@ private func handleSubagentEvent(
         return true
 
     case "UserPromptSubmit":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        // Cursor has no SessionStart for Tasks; beforeSubmitPrompt is the relaunch signal.
+        if shouldReopenCursorSubagentOnPrompt(event: event, session: sessions[sessionId]) {
+            sessions[sessionId]?.closedSubagentIds.remove(agentId)
+        }
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         sessions[sessionId]?.subagents[agentId]?.status = .processing
         sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
         if sessions[sessionId]?.status != .waitingApproval && sessions[sessionId]?.status != .waitingQuestion {
@@ -1346,6 +1520,7 @@ private func handleSubagentEvent(
 
     case "SubagentStop", "Stop", "SessionEnd":
         sessions[sessionId]?.subagents.removeValue(forKey: agentId)
+        sessions[sessionId]?.closedSubagentIds.insert(agentId)
         // If no more subagents, revert parent to processing (waiting for main thread to continue)
         if sessions[sessionId]?.subagents.isEmpty == true {
             if sessions[sessionId]?.status == .running && sessions[sessionId]?.currentTool == "Agent" {
@@ -1358,7 +1533,9 @@ private func handleSubagentEvent(
         return true
 
     case "PreToolUse":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         sessions[sessionId]?.subagents[agentId]?.status = .running
         sessions[sessionId]?.subagents[agentId]?.currentTool = event.toolName
         sessions[sessionId]?.subagents[agentId]?.toolDescription = event.toolDescription
@@ -1371,7 +1548,9 @@ private func handleSubagentEvent(
         return true
 
     case "PostToolUse":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         if let tool = sessions[sessionId]?.subagents[agentId]?.currentTool {
             let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
             let desc = sessions[sessionId]?.subagents[agentId]?.toolDescription
@@ -1385,7 +1564,9 @@ private func handleSubagentEvent(
         return true
 
     case "PostToolUseFailure":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         if let tool = sessions[sessionId]?.subagents[agentId]?.currentTool {
             let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
             let desc = sessions[sessionId]?.subagents[agentId]?.toolDescription
@@ -1395,6 +1576,51 @@ private func handleSubagentEvent(
         sessions[sessionId]?.subagents[agentId]?.currentTool = nil
         sessions[sessionId]?.subagents[agentId]?.toolDescription = nil
         sessions[sessionId]?.lastActivity = Date()
+        return true
+
+    case "AfterAgentResponse":
+        // Merged Cursor Task events arrive with parent session_id + child agent_id.
+        // Handle here so they do not overwrite the parent's reply or enqueue a false completion.
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
+        sessions[sessionId]?.subagents[agentId]?.status = .processing
+        sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+        sessions[sessionId]?.lastActivity = Date()
+        if sessions[sessionId]?.status != .waitingApproval
+            && sessions[sessionId]?.status != .waitingQuestion
+            && sessions[sessionId]?.status != .running {
+            sessions[sessionId]?.status = .processing
+        }
+        return true
+
+    case "Notification":
+        // Keep folded Tasks' ask/question notifications on the parent card.
+        // Swallowing them here (as AfterAgentResponse did) dropped waitingQuestion.
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
+        sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+        sessions[sessionId]?.lastActivity = Date()
+        let notificationText = firstStringFromEvent(
+            event,
+            keys: ["message", "text", "summary", "status", "detail"],
+            includeNested: true
+        )
+        if let msg = notificationText, !msg.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+            sessions[sessionId]?.toolDescription = msg
+            sessions[sessionId]?.subagents[agentId]?.toolDescription = msg
+        }
+        if QuestionPayload.from(event: event) != nil {
+            sessions[sessionId]?.status = .waitingQuestion
+            sessions[sessionId]?.subagents[agentId]?.status = .waitingQuestion
+            effects.append(.setActiveSession(sessionId: sessionId))
+        } else if sessions[sessionId]?.status != .waitingApproval
+            && sessions[sessionId]?.status != .waitingQuestion
+            && sessions[sessionId]?.status != .running {
+            sessions[sessionId]?.status = .processing
+            sessions[sessionId]?.subagents[agentId]?.status = .processing
+        }
         return true
 
     default:
